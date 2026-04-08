@@ -37,6 +37,18 @@ def set_seeds(seed: int):
     torch.manual_seed(seed)
 
 
+def progress(i: int, total: int, scenario: str, extra: str = ""):
+    """Print inline progress bar."""
+    pct = (i + 1) / total * 100
+    bar_len = 30
+    filled = int(bar_len * (i + 1) / total)
+    bar = "#" * filled + "-" * (bar_len - filled)
+    msg = f"\r  [{bar}] {i+1}/{total} ({pct:5.1f}%) {scenario}"
+    if extra:
+        msg += f"  {extra}"
+    print(msg, end="", flush=True)
+
+
 def percentile(data: List[float], p: float) -> float:
     if not data:
         return 0.0
@@ -115,6 +127,9 @@ def run_exact_hit(cache: NanoLMCache, seq_lengths: List[int],
         total_matched += matched
         total_tokens += seq_len
 
+        progress(i, requests, "exact_hit", f"seq={seq_len}")
+    print()
+
     avg_seq_len = total_tokens / requests if requests else 0
     store_avg_s = statistics.mean(store_times) / 1000 if store_times else 1
     retrieve_avg_s = statistics.mean(retrieve_times) / 1000 if retrieve_times else 1
@@ -163,6 +178,9 @@ def run_prefix_hit(cache: NanoLMCache, seq_lengths: List[int],
         total_matched += matched
         total_tokens += len(query)
 
+        progress(i, requests, "prefix_hit", f"matched={matched}")
+    print()
+
     retrieve_avg_s = statistics.mean(retrieve_times) / 1000 if retrieve_times else 1
     avg_matched = total_matched / requests if requests else 0
     matched_kv_mb = avg_matched * bytes_per_token / 1e6
@@ -200,6 +218,9 @@ def run_miss(cache: NanoLMCache, seq_lengths: List[int],
         retrieve_times.append((time.perf_counter() - t0) * 1000)
 
         assert matched == 0
+
+        progress(i, requests, "miss")
+    print()
 
     return {
         "scenario": "miss",

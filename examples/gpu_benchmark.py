@@ -50,6 +50,18 @@ def set_seeds(seed: int):
     torch.cuda.manual_seed_all(seed)
 
 
+def progress(i: int, total: int, label: str, extra: str = ""):
+    """Print inline progress bar."""
+    pct = (i + 1) / total * 100
+    bar_len = 30
+    filled = int(bar_len * (i + 1) / total)
+    bar = "#" * filled + "-" * (bar_len - filled)
+    msg = f"\r  [{bar}] {i+1}/{total} ({pct:5.1f}%) {label}"
+    if extra:
+        msg += f"  {extra}"
+    print(msg, end="", flush=True)
+
+
 def percentile(data: List[float], p: float) -> float:
     if not data:
         return 0.0
@@ -116,7 +128,8 @@ def bench_transfer(sizes_mb: List[float], iterations: int,
     results: Dict[str, List[Dict[str, Any]]] = {"gpu_to_cpu": [], "cpu_to_gpu_pinned": [],
                                                   "cpu_to_gpu_paged": []}
 
-    for size_mb in sizes_mb:
+    for idx, size_mb in enumerate(sizes_mb):
+        progress(idx, len(sizes_mb), "transfer", f"{size_mb}MB")
         n = max(1, int(size_mb * 1e6 / 2))  # float16
 
         # GPU -> CPU
@@ -170,6 +183,7 @@ def bench_transfer(sizes_mb: List[float], iterations: int,
         results["cpu_to_gpu_paged"].append({"size_mb": size_mb, "throughput_gbps": round(throughput, 2),
                                             "latency_ms": latency_stats(times)})
 
+    print()
     return {"benchmark": "transfer", **results}
 
 
@@ -219,15 +233,20 @@ def bench_cache_ops(layers: int, heads: int, head_dim: int,
                 torch.cuda.synchronize()
                 store_times.append((time.perf_counter() - t0) * 1000)
 
+                progress(i, iterations, f"store seq={seq_len}")
+
             # retrieve every stored sequence
             total_matched = 0
-            for tokens in all_tokens:
+            for i, tokens in enumerate(all_tokens):
                 torch.cuda.synchronize()
                 t0 = time.perf_counter()
                 _, matched = cache.retrieve(tokens, target_device="cuda:0")
                 torch.cuda.synchronize()
                 retrieve_times.append((time.perf_counter() - t0) * 1000)
                 total_matched += matched
+
+                progress(i, len(all_tokens), f"retrieve seq={seq_len}")
+            print()
 
             hit_rate = total_matched / (seq_len * iterations) if iterations else 0
 
@@ -289,6 +308,9 @@ def bench_prefix(layers: int, heads: int, head_dim: int,
 
                 if matched > 0:
                     hit_count += 1
+
+                progress(i, requests, f"prefix suffix={suffix_len}")
+            print()
 
             per_suffix.append({
                 "suffix_len": suffix_len,
