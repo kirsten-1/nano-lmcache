@@ -1,197 +1,202 @@
 # nano-lmcache
 
-一个精简的、教学用途的 [LMCache](https://github.com/LMCache/LMCache) 实现 - 用于 LLM 推理加速的 KV Cache 管理系统。
+一个精简的、教学用途的 KV Cache 管理系统 - 独立设计，不依赖 LMCache 实现。
 
-## 项目目标
+## 设计亮点
 
-从零开始实现 LMCache 的核心概念，深入理解：
-- KV Cache 复用如何降低 TTFT (Time To First Token)
-- 多层存储架构 (GPU → CPU → Disk)
-- 基于 Token 的 Cache 索引与检索
-- 异步 Cache 操作
+相比 LMCache 的固定 chunk 设计，我们采用了：
 
-## 架构概览
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     NanoLMCacheEngine                       │
-├─────────────────────────────────────────────────────────────┤
-│  ┌─────────────┐  ┌──────────────┐  ┌──────────────────┐   │
-│  │ TokenIndex  │  │ CacheManager │  │ MemoryAllocator  │   │
-│  │ (hash→key)  │  │ (get/put)    │  │ (alloc/free)     │   │
-│  └─────────────┘  └──────────────┘  └──────────────────┘   │
-├─────────────────────────────────────────────────────────────┤
-│                    Storage Backends                         │
-│  ┌──────────┐    ┌──────────┐    ┌──────────┐             │
-│  │   CPU    │ ←→ │   Disk   │ ←→ │  Remote  │             │
-│  │  Memory  │    │  (File)  │    │ (Redis)  │             │
-│  └──────────┘    └──────────┘    └──────────┘             │
-└─────────────────────────────────────────────────────────────┘
-```
-
-## 核心组件
-
-### 1. Token Index (`nano_lmcache/index/`)
-将 token 序列映射到 cache key，使用 rolling hash 算法。
-- `TokenHasher`: 计算 token 序列的 hash 值
-- `TokenDatabase`: 维护 token → cache_key 的映射关系
-
-### 2. Cache Manager (`nano_lmcache/cache/`)
-Cache 操作的中央协调器。
-- `CacheEngine`: 主入口，协调 store/retrieve 操作
-- `CachePolicy`: 淘汰策略 (LRU, LFU)
-
-### 3. Storage Backends (`nano_lmcache/storage/`)
-可插拔的存储层，统一接口设计。
-- `BaseBackend`: 抽象接口
-- `CPUBackend`: 内存存储，使用 numpy/torch tensors
-- `DiskBackend`: 基于文件的存储，支持 memory-mapping
-- `RedisBackend`: (可选) 远程存储，用于分布式场景
-
-### 4. Memory Management (`nano_lmcache/memory/`)
-KV Tensor 的高效内存分配。
-- `MemoryPool`: 预分配的 tensor pool
-- `MemoryObj`: KV cache 数据的封装，包含 metadata
-
-### 5. Serialization (`nano_lmcache/serde/`)
-KV Cache 的高效序列化/反序列化。
-- `Serializer`: Tensor → bytes
-- `Deserializer`: bytes → Tensor
-
-## 项目结构
-
-```
-nano-lmcache/
-├── README.md
-├── pyproject.toml
-├── nano_lmcache/
-│   ├── __init__.py
-│   ├── config.py              # 配置 dataclasses
-│   ├── engine.py              # 主 CacheEngine
-│   │
-│   ├── index/
-│   │   ├── __init__.py
-│   │   ├── hasher.py          # Token 序列 hashing
-│   │   └── database.py        # Token → key 映射
-│   │
-│   ├── cache/
-│   │   ├── __init__.py
-│   │   ├── manager.py         # Cache 协调
-│   │   └── policy.py          # 淘汰策略 (LRU)
-│   │
-│   ├── storage/
-│   │   ├── __init__.py
-│   │   ├── base.py            # 抽象 backend 接口
-│   │   ├── cpu.py             # CPU memory backend
-│   │   ├── disk.py            # Disk backend
-│   │   └── redis.py           # Redis backend (可选)
-│   │
-│   ├── memory/
-│   │   ├── __init__.py
-│   │   ├── allocator.py       # Memory pool 管理
-│   │   └── obj.py             # MemoryObj 封装
-│   │
-│   └── serde/
-│       ├── __init__.py
-│       └── tensor.py          # Tensor 序列化
-│
-├── examples/
-│   ├── basic_usage.py         # 简单的 store/retrieve demo
-│   ├── multi_tier.py          # CPU + Disk 分层存储
-│   └── benchmark.py           # 性能对比测试
-│
-└── tests/
-    ├── test_hasher.py
-    ├── test_storage.py
-    ├── test_cache.py
-    └── test_engine.py
-```
-
-## 实现计划
-
-### Phase 1: 核心基础
-- [ ] 项目初始化 (pyproject.toml, 基础结构)
-- [ ] 配置系统 (`config.py`)
-- [ ] Token hasher (`index/hasher.py`)
-- [ ] 基础 token database (`index/database.py`)
-
-### Phase 2: 存储层
-- [ ] 抽象 backend 接口 (`storage/base.py`)
-- [ ] CPU memory backend (`storage/cpu.py`)
-- [ ] Disk backend (`storage/disk.py`)
-- [ ] 基础序列化 (`serde/tensor.py`)
-
-### Phase 3: Cache 管理
-- [ ] Memory object 封装 (`memory/obj.py`)
-- [ ] LRU 淘汰策略 (`cache/policy.py`)
-- [ ] Cache manager (`cache/manager.py`)
-
-### Phase 4: Engine 集成
-- [ ] 主 CacheEngine (`engine.py`)
-- [ ] Store/Retrieve API
-- [ ] 异步操作支持
-
-### Phase 5: 进阶特性
-- [ ] 多层存储 (CPU → Disk 的 promotion/demotion)
-- [ ] Redis backend 用于分布式 caching
-- [ ] Prefix matching 实现部分 cache hit
-- [ ] Metrics 和 observability
-
-## 与 LMCache 的主要差异
-
-| 方面 | LMCache | nano-lmcache |
+| 特性 | LMCache | nano-lmcache |
 |------|---------|--------------|
-| 定位 | 生产级别 | 教学用途 |
-| GPU 支持 | CUDA kernels, GDS | 仅 CPU (更简单) |
-| Backends | NIXL, P2P, PD 等 | CPU, Disk, Redis |
-| 集成 | vLLM, SGLang | 独立运行 |
-| 多进程 | 复杂 IPC | 单进程 |
-| 可观测性 | 完整 metrics | 基础 logging |
+| 切分策略 | 固定大小 chunk | **变长 Segment** (语义切分) |
+| 索引结构 | Hash Table | **Radix Tree** (高效前缀匹配) |
+| 复杂度 | 生产级 (多进程/CUDA) | 教学级 (简洁清晰) |
+| 存储层 | GPU/CPU/Disk/Remote | CPU/Disk (可扩展) |
+
+## 安装
+
+```bash
+cd nano-lmcache
+pip install -e .
+```
 
 ## 快速开始
 
 ```python
-from nano_lmcache import NanoLMCache, Config
+import torch
+from nano_lmcache import NanoLMCache, NanoLMCacheConfig
 
 # 初始化 cache
-config = Config(
-    chunk_size=256,
-    max_cache_size_gb=4.0,
-    storage_backend="cpu",  # 或 "disk", "redis"
-)
+config = NanoLMCacheConfig()
 cache = NanoLMCache(config)
 
 # 存储 KV cache
 tokens = [1, 2, 3, 4, 5]  # Token IDs
-kv_tensor = torch.randn(32, 2, 256, 128)  # [layers, 2, seq_len, head_dim]
+# Shape: [num_layers, 2, seq_len, num_heads, head_dim]
+kv_tensor = torch.randn(32, 2, 5, 8, 128, dtype=torch.float16)
 cache.store(tokens, kv_tensor)
 
 # 检索 KV cache
 cached_kv, hit_length = cache.retrieve(tokens)
 if cached_kv is not None:
     print(f"Cache hit! 检索到 {hit_length} 个 tokens")
+
+# 前缀匹配
+new_tokens = [1, 2, 3, 4, 5, 6, 7, 8]  # 前 5 个相同
+cached_kv, hit_length = cache.retrieve(new_tokens)
+print(f"Prefix match: {hit_length} tokens")  # 输出: 5 tokens
 ```
 
-## 核心概念解释
+## 架构
 
-### 为什么需要 KV Cache？
-在 Transformer 的自回归推理中，每生成一个新 token 都需要重新计算之前所有 token 的 Key 和 Value。KV Cache 将这些中间结果缓存起来，避免重复计算。
+```
+┌─────────────────────────────────────────────────────────────┐
+│                       NanoLMCache                           │
+├─────────────────────────────────────────────────────────────┤
+│  ┌─────────────────┐     ┌────────────────────────────┐    │
+│  │ SegmentSplitter │────▶│   Segment-based RadixTree  │    │
+│  │  (变长切分)      │     │   (高效前缀匹配索引)        │    │
+│  └─────────────────┘     └────────────────────────────┘    │
+│                                      │                      │
+│                                      ▼                      │
+│                    ┌─────────────────────────────────┐     │
+│                    │    TieredStorageManager         │     │
+│                    │  (分层存储 + LRU 淘汰)           │     │
+│                    └─────────────────────────────────┘     │
+│                           │                  │              │
+│                           ▼                  ▼              │
+│                    ┌───────────┐      ┌───────────┐        │
+│                    │  L1: CPU  │ ───▶ │ L2: Disk  │        │
+│                    │  (热数据)  │      │  (冷数据)  │        │
+│                    └───────────┘      └───────────┘        │
+└─────────────────────────────────────────────────────────────┘
+```
 
-### 为什么需要 LMCache？
-当多个请求有相同的 prefix（如系统提示词、RAG 检索的文档），这些 prefix 的 KV Cache 可以被复用。LMCache 将 KV Cache 存储到 CPU/Disk/远程存储，实现跨请求复用。
+## 项目结构
 
-### Chunking 策略
-将长序列分成固定大小的 chunks，每个 chunk 独立计算 hash 和存储。这样可以实现更细粒度的 cache 复用。
+```
+nano-lmcache/
+├── pyproject.toml
+├── nano_lmcache/
+│   ├── __init__.py
+│   ├── config.py          # 配置 dataclasses
+│   ├── engine.py          # 主引擎 NanoLMCache
+│   ├── segment.py         # Segment 切分 + Rolling Hash
+│   ├── index.py           # Radix Tree 索引
+│   └── storage/
+│       ├── base.py        # 存储抽象接口
+│       ├── cpu.py         # CPU 内存存储
+│       ├── disk.py        # 磁盘存储
+│       └── manager.py     # 分层存储管理器
+├── examples/
+│   ├── basic_usage.py     # 基础用法示例
+│   └── benchmark.py       # 性能测试
+└── tests/
+    ├── test_segment.py
+    ├── test_index.py
+    ├── test_storage.py
+    └── test_engine.py
+```
+
+## 核心组件
+
+### 1. SegmentSplitter (`segment.py`)
+
+**变长 Segment 切分** - 不同于 LMCache 的固定 chunk：
+
+```python
+# LMCache: 固定 256 tokens 一个 chunk
+# nano-lmcache: 根据语义边界自动切分
+
+splitter = SegmentSplitter(
+    max_length=512,
+    min_length=32,
+    boundary_tokens=[13, 198],  # 换行符等
+)
+segments = splitter.split(tokens)
+```
+
+### 2. SegmentRadixTree (`index.py`)
+
+**Radix Tree 索引** - 高效前缀匹配：
+
+```python
+# O(n) 前缀匹配，n 是 segment 数量
+tree = SegmentRadixTree()
+tree.insert(segments, StorageTier.CPU)
+
+result = tree.match_prefix(query_segments)
+# result.matched_tokens: 匹配的 token 数
+# result.matched_segments: 匹配的 segment 元数据
+```
+
+### 3. TieredStorageManager (`storage/manager.py`)
+
+**分层存储** - 自动 promotion/demotion：
+
+```python
+manager = TieredStorageManager(
+    cpu_size_gb=4.0,
+    disk_size_gb=50.0,
+)
+
+# 存储 (优先 CPU，满了自动降级到 Disk)
+manager.put(key, tensor)
+
+# 读取 (自动从正确的层级加载)
+tensor = manager.get(key)
+
+# 手动提升到更快的层级
+manager.promote(key, StorageTier.CPU)
+```
+
+## 运行测试
+
+```bash
+pip install -e ".[dev]"
+pytest tests/ -v
+```
+
+## 运行示例
+
+```bash
+python examples/basic_usage.py
+python examples/benchmark.py
+```
+
+## 配置选项
+
+```python
+from nano_lmcache import NanoLMCacheConfig, StorageConfig, SegmentConfig
+
+config = NanoLMCacheConfig(
+    storage=StorageConfig(
+        cpu_size_gb=4.0,           # CPU 缓存大小
+        disk_size_gb=50.0,         # 磁盘缓存大小
+        disk_cache_dir="/tmp/cache",
+        use_pinned_memory=True,    # 使用 pinned memory 加速传输
+    ),
+    segment=SegmentConfig(
+        max_segment_length=512,    # 最大 segment 长度
+        min_segment_length=32,     # 最小 segment 长度
+    ),
+    enable_async_write=True,       # 异步写入
+    enable_prefetch=True,          # 预取支持
+)
+```
+
+## 性能对比
+
+后续我们会与 LMCache 进行对比测试，验证：
+- 前缀匹配效率
+- 变长 Segment 的复用率
+- 存储层切换延迟
 
 ## 学习资源
 
+- [教程目录](/Users/apple/Documents/AI/面试题收集/最新最全高质量面试题/My_LMCache/) - 从原理到实现的完整教程
 - [LMCache Technical Report](https://lmcache.ai/tech_report.pdf)
-- [CacheGen Paper (SIGCOMM 2024)](https://dl.acm.org/doi/10.1145/3651890.3672274)
-- [CacheBlend Paper (EuroSys 2025)](https://doi.org/10.1145/3689031.3696098)
-
-## 致谢
-
-本项目灵感来源于 [LMCache](https://github.com/LMCache/LMCache)，感谢 LMCache 团队的原创设计。
+- [SGLang RadixAttention](https://arxiv.org/abs/2312.07104)
 
 ## License
 
