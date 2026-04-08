@@ -22,7 +22,7 @@ class NanoLMCache:
     Features:
     - Variable-length segment-based caching
     - Radix tree for efficient prefix matching
-    - Tiered storage (CPU -> Disk)
+    - Tiered storage (GPU -> CPU -> Disk)
     - Async write support
     - LRU eviction
     """
@@ -53,10 +53,12 @@ class NanoLMCache:
         self.index = SegmentRadixTree()
 
         self.storage = TieredStorageManager(
+            gpu_size_gb=self.config.storage.gpu_size_gb,
             cpu_size_gb=self.config.storage.cpu_size_gb,
             disk_cache_dir=self.config.storage.disk_cache_dir,
             disk_size_gb=self.config.storage.disk_size_gb,
             use_pinned=self.config.storage.use_pinned_memory,
+            gpu_device=self.config.storage.gpu_device,
         )
 
         # Async write support

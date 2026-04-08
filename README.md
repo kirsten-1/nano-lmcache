@@ -160,8 +160,17 @@ pytest tests/ -v
 ## 运行示例
 
 ```bash
+# 基础用法
 python examples/basic_usage.py
+
+# CPU 性能测试
 python examples/benchmark.py
+
+# GPU 性能测试 (需要 CUDA)
+python examples/gpu_benchmark.py
+
+# vLLM 集成示例
+python examples/vllm_integration_example.py
 ```
 
 ## 配置选项

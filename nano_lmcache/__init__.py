@@ -6,7 +6,10 @@ Core components:
 - Config: Configuration dataclass
 - Segment: Token sequence segmentation
 - RadixTree: Efficient prefix matching index
-- TieredStorage: Multi-tier storage management (CPU/Disk)
+- TieredStorage: Multi-tier storage management (GPU/CPU/Disk)
+
+Integration:
+- VLLMConnector: Integration with vLLM inference engine
 """
 
 from .config import (

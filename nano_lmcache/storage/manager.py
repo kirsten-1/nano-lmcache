@@ -11,59 +11,94 @@ class TieredStorageManager:
     """
     Multi-tier storage manager.
 
-    Manages data across CPU and Disk tiers with automatic
+    Manages data across GPU, CPU, and Disk tiers with automatic
     promotion/demotion based on access patterns.
 
     Tier hierarchy:
+    - GPU (L0): Fastest, most limited (optional)
     - CPU (L1): Fast, limited capacity
     - Disk (L2): Slow, large capacity
 
     Strategy:
-    - New data goes to CPU
-    - When CPU is full, demote LRU to Disk
-    - On access, promote from Disk to CPU if space available
+    - New data goes to highest available tier
+    - When tier is full, demote LRU to lower tier
+    - On access, optionally promote to higher tier
     """
+
+    # Tier ordering from fastest to slowest
+    TIER_ORDER = [StorageTier.GPU, StorageTier.CPU, StorageTier.DISK]
 
     def __init__(
         self,
+        gpu_size_gb: float = 0.0,
         cpu_size_gb: float = 4.0,
         disk_cache_dir: str = "/tmp/nano_lmcache",
         disk_size_gb: float = 50.0,
         use_pinned: bool = True,
+        gpu_device: str = "cuda:0",
     ):
         """
         Initialize tiered storage.
 
         Args:
+            gpu_size_gb: GPU storage capacity in GB (0 to disable)
             cpu_size_gb: CPU storage capacity in GB
             disk_cache_dir: Directory for disk storage
             disk_size_gb: Disk storage capacity in GB
             use_pinned: Use pinned memory for CPU storage
+            gpu_device: CUDA device for GPU storage
         """
-        self.backends = {
-            StorageTier.CPU: CPUStorageBackend(
-                int(cpu_size_gb * 1e9),
-                use_pinned=use_pinned,
-            ),
-            StorageTier.DISK: DiskStorageBackend(
-                disk_cache_dir,
-                int(disk_size_gb * 1e9),
-            ),
-        }
+        self.backends: Dict[StorageTier, any] = {}
+        self._active_tiers: List[StorageTier] = []
+
+        # Initialize GPU backend if requested and available
+        if gpu_size_gb > 0:
+            try:
+                from .gpu import GPUStorageBackend
+                self.backends[StorageTier.GPU] = GPUStorageBackend(
+                    int(gpu_size_gb * 1e9),
+                    device=gpu_device,
+                )
+                self._active_tiers.append(StorageTier.GPU)
+            except (ImportError, RuntimeError) as e:
+                print(f"GPU storage disabled: {e}")
+
+        # CPU backend
+        self.backends[StorageTier.CPU] = CPUStorageBackend(
+            int(cpu_size_gb * 1e9),
+            use_pinned=use_pinned,
+        )
+        self._active_tiers.append(StorageTier.CPU)
+
+        # Disk backend
+        self.backends[StorageTier.DISK] = DiskStorageBackend(
+            disk_cache_dir,
+            int(disk_size_gb * 1e9),
+        )
+        self._active_tiers.append(StorageTier.DISK)
 
         # Track location of each key
         self._locations: Dict[str, StorageTier] = {}
 
         # LRU order for each tier
         self._access_order: Dict[StorageTier, List[str]] = {
-            tier: [] for tier in [StorageTier.CPU, StorageTier.DISK]
+            tier: [] for tier in self._active_tiers
         }
+
+    @property
+    def default_tier(self) -> StorageTier:
+        """Get the default (fastest available) tier."""
+        return self._active_tiers[0]
+
+    def has_gpu(self) -> bool:
+        """Check if GPU tier is available."""
+        return StorageTier.GPU in self.backends
 
     def put(
         self,
         key: str,
         tensor: torch.Tensor,
-        tier: StorageTier = StorageTier.CPU,
+        tier: Optional[StorageTier] = None,
     ) -> Tuple[bool, StorageTier]:
         """
         Store a tensor.
@@ -71,16 +106,19 @@ class TieredStorageManager:
         Args:
             key: Unique identifier
             tensor: Tensor to store
-            tier: Preferred storage tier
+            tier: Preferred storage tier (default: fastest available)
 
         Returns:
             (success, actual_tier)
         """
-        backend = self.backends.get(tier)
-        if backend is None:
-            # Fall back to CPU if tier not available
-            tier = StorageTier.CPU
-            backend = self.backends[tier]
+        if tier is None:
+            tier = self.default_tier
+
+        # Ensure tier is available
+        if tier not in self.backends:
+            tier = self.default_tier
+
+        backend = self.backends[tier]
 
         # Try to store in preferred tier
         if backend.put(key, tensor):
@@ -112,7 +150,7 @@ class TieredStorageManager:
 
         Args:
             key: Identifier
-            target_device: Device to move tensor to
+            target_device: Device to move tensor to ("cpu", "cuda:0", etc.)
 
         Returns:
             Tensor on target device, or None if not found
@@ -131,24 +169,30 @@ class TieredStorageManager:
         # Update access order
         self._update_access(tier, key)
 
-        # Move to target device
-        if target_device != "cpu":
+        # Move to target device if needed
+        if target_device == "cpu":
+            if tensor.is_cuda:
+                return tensor.cpu()
+            return tensor
+        else:
             return tensor.to(target_device)
-        return tensor
 
-    def promote(self, key: str, target_tier: StorageTier = StorageTier.CPU) -> bool:
+    def promote(self, key: str, target_tier: Optional[StorageTier] = None) -> bool:
         """
         Promote a key to a higher tier.
 
         Args:
             key: Key to promote
-            target_tier: Target tier (must be higher than current)
+            target_tier: Target tier (default: fastest available)
 
         Returns:
             True if promoted successfully
         """
         if key not in self._locations:
             return False
+
+        if target_tier is None:
+            target_tier = self.default_tier
 
         current_tier = self._locations[key]
 
@@ -167,16 +211,19 @@ class TieredStorageManager:
             return False
 
         # Make room if needed
+        attempts = 0
+        max_attempts = 10
         while not target_backend.put(key, tensor):
-            if not self._evict_one(target_tier):
+            if not self._evict_one(target_tier) or attempts >= max_attempts:
                 return False
+            attempts += 1
 
         # Remove from old tier
         self.backends[current_tier].delete(key)
         self._locations[key] = target_tier
 
         # Update access order
-        if key in self._access_order[current_tier]:
+        if key in self._access_order.get(current_tier, []):
             self._access_order[current_tier].remove(key)
         self._update_access(target_tier, key)
 
@@ -205,7 +252,7 @@ class TieredStorageManager:
         success, actual_tier = self.put(key, tensor, lower)
         if success:
             self.backends[current_tier].delete(key)
-            if key in self._access_order[current_tier]:
+            if key in self._access_order.get(current_tier, []):
                 self._access_order[current_tier].remove(key)
 
         return success
@@ -220,7 +267,7 @@ class TieredStorageManager:
 
         if success:
             self._locations.pop(key, None)
-            if key in self._access_order[tier]:
+            if key in self._access_order.get(tier, []):
                 self._access_order[tier].remove(key)
 
         return success
@@ -235,7 +282,7 @@ class TieredStorageManager:
 
     def _evict_one(self, tier: StorageTier) -> bool:
         """Evict one entry from a tier (LRU)."""
-        if not self._access_order[tier]:
+        if tier not in self._access_order or not self._access_order[tier]:
             return False
 
         # Get LRU key
@@ -250,6 +297,8 @@ class TieredStorageManager:
 
     def _update_access(self, tier: StorageTier, key: str):
         """Update LRU access order."""
+        if tier not in self._access_order:
+            self._access_order[tier] = []
         order = self._access_order[tier]
         if key in order:
             order.remove(key)
@@ -257,34 +306,47 @@ class TieredStorageManager:
 
     def _lower_tier(self, tier: StorageTier) -> Optional[StorageTier]:
         """Get the next lower tier."""
-        levels = [StorageTier.CPU, StorageTier.DISK]
         try:
-            idx = levels.index(tier)
-            return levels[idx + 1] if idx + 1 < len(levels) else None
+            idx = self._active_tiers.index(tier)
+            return self._active_tiers[idx + 1] if idx + 1 < len(self._active_tiers) else None
+        except ValueError:
+            return None
+
+    def _higher_tier(self, tier: StorageTier) -> Optional[StorageTier]:
+        """Get the next higher tier."""
+        try:
+            idx = self._active_tiers.index(tier)
+            return self._active_tiers[idx - 1] if idx > 0 else None
         except ValueError:
             return None
 
     def _tier_level(self, tier: StorageTier) -> int:
         """Get numeric level of a tier (lower = faster)."""
-        levels = {StorageTier.CPU: 0, StorageTier.DISK: 1}
-        return levels.get(tier, 999)
+        try:
+            return self._active_tiers.index(tier)
+        except ValueError:
+            return 999
 
     def stats(self) -> Dict:
         """Get storage statistics."""
-        return {
-            tier.value: {
-                **self.backends[tier].stats(),
-                "access_order_len": len(self._access_order[tier]),
-            }
-            for tier in [StorageTier.CPU, StorageTier.DISK]
-            if tier in self.backends
-        }
+        result = {}
+        for tier in self._active_tiers:
+            if tier in self.backends:
+                backend_stats = self.backends[tier].stats()
+                backend_stats["access_order_len"] = len(self._access_order.get(tier, []))
+                result[tier.value] = backend_stats
+        return result
 
     def clear(self):
         """Clear all storage."""
-        for tier in [StorageTier.CPU, StorageTier.DISK]:
+        for tier in self._active_tiers:
             if tier in self.backends:
                 self.backends[tier].clear()
         self._locations.clear()
         for tier in self._access_order:
             self._access_order[tier].clear()
+
+    def synchronize(self):
+        """Synchronize all GPU operations."""
+        if StorageTier.GPU in self.backends:
+            self.backends[StorageTier.GPU].synchronize()
