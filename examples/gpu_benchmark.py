@@ -181,7 +181,7 @@ def bench_cache_ops(layers: int, heads: int, head_dim: int,
                     seq_lengths: List[int], iterations: int,
                     warmup: int, gpu_size_gb: float,
                     cpu_size_gb: float) -> Dict[str, Any]:
-    """Store + exact-retrieve with GPU tier."""
+    """Store + exact-retrieve with GPU tier.  Retrieves every stored sequence."""
     bytes_per_token = 2 * layers * heads * head_dim * 2  # float16
     per_scenario: List[Dict[str, Any]] = []
 
@@ -205,10 +205,13 @@ def bench_cache_ops(layers: int, heads: int, head_dim: int,
 
             store_times: List[float] = []
             retrieve_times: List[float] = []
+            all_tokens: List[List[int]] = []
 
+            # store iterations distinct sequences
             for i in range(iterations):
                 tokens = [t + i * 100000 for t in range(seq_len)]
                 kv = make_kv(layers, heads, head_dim, seq_len)
+                all_tokens.append(tokens)
 
                 torch.cuda.synchronize()
                 t0 = time.perf_counter()
@@ -216,25 +219,26 @@ def bench_cache_ops(layers: int, heads: int, head_dim: int,
                 torch.cuda.synchronize()
                 store_times.append((time.perf_counter() - t0) * 1000)
 
-            # retrieve the last stored sequence
-            tokens_last = [t + (iterations - 1) * 100000 for t in range(seq_len)]
-            for _ in range(warmup):
-                cache.retrieve(tokens_last, target_device="cuda:0")
-            torch.cuda.synchronize()
-
-            for _ in range(iterations):
+            # retrieve every stored sequence
+            for tokens in all_tokens:
                 torch.cuda.synchronize()
                 t0 = time.perf_counter()
-                _, matched = cache.retrieve(tokens_last, target_device="cuda:0")
+                _, matched = cache.retrieve(tokens, target_device="cuda:0")
                 torch.cuda.synchronize()
                 retrieve_times.append((time.perf_counter() - t0) * 1000)
 
             kv_size_mb = round(seq_len * bytes_per_token / 1e6, 2)
+            store_avg_s = statistics.mean(store_times) / 1000 if store_times else 1
+            retrieve_avg_s = statistics.mean(retrieve_times) / 1000 if retrieve_times else 1
             per_scenario.append({
                 "seq_len": seq_len,
                 "kv_size_mb": kv_size_mb,
                 "store_latency_ms": latency_stats(store_times),
                 "retrieve_latency_ms": latency_stats(retrieve_times),
+                "store_throughput_tokens_per_s": round(seq_len / store_avg_s),
+                "store_throughput_gbps": round(kv_size_mb / store_avg_s / 1000, 3),
+                "retrieve_throughput_tokens_per_s": round(seq_len / retrieve_avg_s),
+                "retrieve_throughput_gbps": round(kv_size_mb / retrieve_avg_s / 1000, 3),
             })
 
     return {"benchmark": "cache_ops", "bytes_per_token": bytes_per_token,
@@ -315,11 +319,10 @@ def bench_tier(layers: int, heads: int, head_dim: int,
         cache.store(tokens, kv, async_write=False)
 
         for _ in range(iterations):
-            # demote all to CPU
-            for key in list(cache.storage._locations.keys()):
-                cache.storage.demote(key)
+            # demote all to CPU via public API
+            cache.storage.demote_all()
 
-            # promote
+            # promote back to GPU
             torch.cuda.synchronize()
             t0 = time.perf_counter()
             cache.prefetch(tokens, StorageTier.GPU)
@@ -331,18 +334,21 @@ def bench_tier(layers: int, heads: int, head_dim: int,
 
             torch.cuda.synchronize()
             t0 = time.perf_counter()
-            for key in list(cache.storage._locations.keys()):
-                cache.storage.demote(key)
+            cache.storage.demote_all()
             torch.cuda.synchronize()
             demote_times.append((time.perf_counter() - t0) * 1000)
 
     kv_size_mb = round(seq_len * 2 * layers * heads * head_dim * 2 / 1e6, 2)
+    promote_avg_s = statistics.mean(promote_times) / 1000 if promote_times else 1
+    demote_avg_s = statistics.mean(demote_times) / 1000 if demote_times else 1
     return {
         "benchmark": "tier_promotion",
         "seq_len": seq_len,
         "kv_size_mb": kv_size_mb,
         "cpu_to_gpu_ms": latency_stats(promote_times),
         "gpu_to_cpu_ms": latency_stats(demote_times),
+        "promote_throughput_gbps": round(kv_size_mb / promote_avg_s / 1000, 3),
+        "demote_throughput_gbps": round(kv_size_mb / demote_avg_s / 1000, 3),
     }
 
 
@@ -419,7 +425,11 @@ def main():
         for sc in res["scenarios"]:
             print(f"  seq_len={sc['seq_len']:5d}  kv={sc['kv_size_mb']:.1f}MB")
             print_latency("Store", sc["store_latency_ms"])
+            print(f"    throughput: {sc['store_throughput_tokens_per_s']:,} tok/s  "
+                  f"{sc['store_throughput_gbps']:.3f} GB/s")
             print_latency("Retrieve", sc["retrieve_latency_ms"])
+            print(f"    throughput: {sc['retrieve_throughput_tokens_per_s']:,} tok/s  "
+                  f"{sc['retrieve_throughput_gbps']:.3f} GB/s")
         print()
 
     # --- prefix ---
@@ -443,7 +453,9 @@ def main():
         all_results.append(res)
         print(f"  KV size: {res['kv_size_mb']} MB")
         print_latency("CPU->GPU promote", res["cpu_to_gpu_ms"])
+        print(f"    throughput: {res['promote_throughput_gbps']:.3f} GB/s")
         print_latency("GPU->CPU demote", res["gpu_to_cpu_ms"])
+        print(f"    throughput: {res['demote_throughput_gbps']:.3f} GB/s")
         print()
 
     # --- structured output ---

@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 import hashlib
+import struct
 
 
 @dataclass
@@ -141,9 +142,13 @@ class SegmentSplitter:
 
     @staticmethod
     def _compute_hash(tokens: List[int]) -> str:
-        """Compute hash for a token sequence."""
-        content = str(tokens).encode("utf-8")
-        return hashlib.sha256(content).hexdigest()
+        """Compute a fast hash for a token sequence.
+
+        Uses struct packing + MD5 instead of str(tokens) + SHA-256
+        to avoid expensive string conversion overhead on large segments.
+        """
+        packed = struct.pack(f">{len(tokens)}i", *tokens)
+        return hashlib.md5(packed).hexdigest()
 
 
 class RollingHasher:

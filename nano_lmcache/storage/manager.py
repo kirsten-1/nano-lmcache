@@ -257,6 +257,19 @@ class TieredStorageManager:
 
         return success
 
+    def demote_all(self) -> int:
+        """
+        Demote all keys to the next lower tier.
+
+        Returns:
+            Number of keys successfully demoted
+        """
+        demoted = 0
+        for key in list(self._locations.keys()):
+            if self.demote(key):
+                demoted += 1
+        return demoted
+
     def delete(self, key: str) -> bool:
         """Delete a key from all tiers."""
         if key not in self._locations:

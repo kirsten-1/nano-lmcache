@@ -66,6 +66,10 @@ def make_kv(layers: int, heads: int, head_dim: int, seq_len: int,
     return torch.randn(layers, 2, seq_len, heads, head_dim, dtype=dtype)
 
 
+def dtype_size(dtype: torch.dtype) -> int:
+    return {torch.float16: 2, torch.bfloat16: 2, torch.float32: 4}.get(dtype, 2)
+
+
 def env_metadata() -> Dict[str, Any]:
     meta: Dict[str, Any] = {
         "platform": platform.platform(),
@@ -91,6 +95,7 @@ def run_exact_hit(cache: NanoLMCache, seq_lengths: List[int],
     retrieve_times: List[float] = []
     total_matched = 0
     total_tokens = 0
+    bytes_per_token = 2 * layers * heads * head_dim * dtype_size(dtype)
 
     for i in range(requests):
         seq_len = seq_lengths[i % len(seq_lengths)]
@@ -110,6 +115,11 @@ def run_exact_hit(cache: NanoLMCache, seq_lengths: List[int],
         total_matched += matched
         total_tokens += seq_len
 
+    avg_seq_len = total_tokens / requests if requests else 0
+    store_avg_s = statistics.mean(store_times) / 1000 if store_times else 1
+    retrieve_avg_s = statistics.mean(retrieve_times) / 1000 if retrieve_times else 1
+    kv_per_req_mb = avg_seq_len * bytes_per_token / 1e6
+
     return {
         "scenario": "exact_hit",
         "requests": requests,
@@ -118,6 +128,10 @@ def run_exact_hit(cache: NanoLMCache, seq_lengths: List[int],
         "token_hit_rate": total_matched / total_tokens if total_tokens else 0,
         "store_latency_ms": latency_stats(store_times),
         "retrieve_latency_ms": latency_stats(retrieve_times),
+        "store_throughput_tokens_per_s": round(avg_seq_len / store_avg_s),
+        "retrieve_throughput_tokens_per_s": round(avg_seq_len / retrieve_avg_s),
+        "store_throughput_gbps": round(kv_per_req_mb / store_avg_s / 1000, 3),
+        "retrieve_throughput_gbps": round(kv_per_req_mb / retrieve_avg_s / 1000, 3),
     }
 
 
@@ -126,6 +140,8 @@ def run_prefix_hit(cache: NanoLMCache, seq_lengths: List[int],
                    layers: int, heads: int, head_dim: int,
                    dtype: torch.dtype) -> Dict[str, Any]:
     """Store a base sequence once, then retrieve prefix + unique suffix."""
+    bytes_per_token = 2 * layers * heads * head_dim * dtype_size(dtype)
+
     # store the prefix/base once
     prefix_tokens = list(range(prefix_length))
     base_kv = make_kv(layers, heads, head_dim, prefix_length, dtype)
@@ -147,6 +163,10 @@ def run_prefix_hit(cache: NanoLMCache, seq_lengths: List[int],
         total_matched += matched
         total_tokens += len(query)
 
+    retrieve_avg_s = statistics.mean(retrieve_times) / 1000 if retrieve_times else 1
+    avg_matched = total_matched / requests if requests else 0
+    matched_kv_mb = avg_matched * bytes_per_token / 1e6
+
     return {
         "scenario": "prefix_hit",
         "requests": requests,
@@ -155,6 +175,8 @@ def run_prefix_hit(cache: NanoLMCache, seq_lengths: List[int],
         "total_matched": total_matched,
         "token_hit_rate": total_matched / total_tokens if total_tokens else 0,
         "retrieve_latency_ms": latency_stats(retrieve_times),
+        "retrieve_throughput_matched_tokens_per_s": round(avg_matched / retrieve_avg_s),
+        "retrieve_throughput_gbps": round(matched_kv_mb / retrieve_avg_s / 1000, 3),
     }
 
 
@@ -296,8 +318,17 @@ def main():
             if "store_latency_ms" in result:
                 sl = result["store_latency_ms"]
                 print(f"  Store    avg={sl['avg']:.2f}ms  p50={sl['p50']:.2f}ms  p95={sl['p95']:.2f}ms")
+                if "store_throughput_tokens_per_s" in result:
+                    print(f"    throughput: {result['store_throughput_tokens_per_s']:,} tok/s  "
+                          f"{result['store_throughput_gbps']:.3f} GB/s")
             rl = result["retrieve_latency_ms"]
             print(f"  Retrieve avg={rl['avg']:.2f}ms  p50={rl['p50']:.2f}ms  p95={rl['p95']:.2f}ms")
+            if "retrieve_throughput_tokens_per_s" in result:
+                print(f"    throughput: {result['retrieve_throughput_tokens_per_s']:,} tok/s  "
+                      f"{result['retrieve_throughput_gbps']:.3f} GB/s")
+            elif "retrieve_throughput_matched_tokens_per_s" in result:
+                print(f"    throughput: {result['retrieve_throughput_matched_tokens_per_s']:,} matched tok/s  "
+                      f"{result['retrieve_throughput_gbps']:.3f} GB/s")
             if "token_hit_rate" in result:
                 print(f"  Token hit rate: {result['token_hit_rate']:.1%}")
             print()
