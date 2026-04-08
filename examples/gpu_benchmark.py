@@ -220,12 +220,16 @@ def bench_cache_ops(layers: int, heads: int, head_dim: int,
                 store_times.append((time.perf_counter() - t0) * 1000)
 
             # retrieve every stored sequence
+            total_matched = 0
             for tokens in all_tokens:
                 torch.cuda.synchronize()
                 t0 = time.perf_counter()
                 _, matched = cache.retrieve(tokens, target_device="cuda:0")
                 torch.cuda.synchronize()
                 retrieve_times.append((time.perf_counter() - t0) * 1000)
+                total_matched += matched
+
+            hit_rate = total_matched / (seq_len * iterations) if iterations else 0
 
             kv_size_mb = round(seq_len * bytes_per_token / 1e6, 2)
             store_avg_s = statistics.mean(store_times) / 1000 if store_times else 1
@@ -235,6 +239,7 @@ def bench_cache_ops(layers: int, heads: int, head_dim: int,
                 "kv_size_mb": kv_size_mb,
                 "store_latency_ms": latency_stats(store_times),
                 "retrieve_latency_ms": latency_stats(retrieve_times),
+                "retrieve_hit_rate": round(hit_rate, 4),
                 "store_throughput_tokens_per_s": round(seq_len / store_avg_s),
                 "store_throughput_gbps": round(kv_size_mb / store_avg_s / 1000, 3),
                 "retrieve_throughput_tokens_per_s": round(seq_len / retrieve_avg_s),
@@ -423,7 +428,8 @@ def main():
                               args.gpu_size_gb, args.cpu_size_gb)
         all_results.append(res)
         for sc in res["scenarios"]:
-            print(f"  seq_len={sc['seq_len']:5d}  kv={sc['kv_size_mb']:.1f}MB")
+            print(f"  seq_len={sc['seq_len']:5d}  kv={sc['kv_size_mb']:.1f}MB  "
+                  f"hit_rate={sc['retrieve_hit_rate']:.0%}")
             print_latency("Store", sc["store_latency_ms"])
             print(f"    throughput: {sc['store_throughput_tokens_per_s']:,} tok/s  "
                   f"{sc['store_throughput_gbps']:.3f} GB/s")

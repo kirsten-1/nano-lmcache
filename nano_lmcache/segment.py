@@ -2,8 +2,6 @@
 
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
-import hashlib
-import struct
 
 
 @dataclass
@@ -144,11 +142,10 @@ class SegmentSplitter:
     def _compute_hash(tokens: List[int]) -> str:
         """Compute a fast hash for a token sequence.
 
-        Uses struct packing + MD5 instead of str(tokens) + SHA-256
-        to avoid expensive string conversion overhead on large segments.
+        Uses Python's built-in hash on a tuple for maximum speed.
+        No cryptographic security needed for KV cache indexing.
         """
-        packed = struct.pack(f">{len(tokens)}i", *tokens)
-        return hashlib.md5(packed).hexdigest()
+        return format(hash(tuple(tokens)) & 0xFFFFFFFFFFFFFFFF, '016x')
 
 
 class RollingHasher:
