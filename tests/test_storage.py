@@ -186,16 +186,16 @@ class TestTieredStorageManager:
     def test_demotion(self, temp_dir):
         """Test automatic demotion when CPU is full."""
         manager = TieredStorageManager(
-            cpu_size_gb=0.0001,  # Very small: ~100 KB
+            cpu_size_gb=0.000001,  # ~1 KB
             disk_cache_dir=temp_dir,
             disk_size_gb=0.01,
         )
 
-        # Fill CPU
+        # Fill CPU with a small tensor first
         tensor1 = make_tensor(100)
         manager.put("key1", tensor1)
 
-        # This should trigger demotion
+        # This should exceed CPU capacity and force demotion/fallback to disk
         tensor2 = make_tensor(1000)
         success, tier = manager.put("key2", tensor2)
 

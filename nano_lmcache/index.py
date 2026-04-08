@@ -1,7 +1,7 @@
 """Radix Tree index for efficient prefix matching."""
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, NamedTuple
+from typing import Dict, List, Optional, NamedTuple, Union
 from enum import Enum
 import time
 
@@ -77,22 +77,26 @@ class SegmentRadixTree:
     def insert(
         self,
         segments: List["Segment"],
-        storage_tier: StorageTier,
+        storage_tier: Union[StorageTier, List[StorageTier]],
     ) -> List[SegmentMeta]:
         """
         Insert a sequence of segments.
 
         Args:
             segments: List of Segment objects
-            storage_tier: Initial storage tier for the KV cache
+            storage_tier: Initial storage tier for the KV cache, or one tier per segment
 
         Returns:
             List of created SegmentMeta objects
         """
         node = self.root
         metas = []
+        if isinstance(storage_tier, list):
+            tiers = storage_tier
+        else:
+            tiers = [storage_tier] * len(segments)
 
-        for seg in segments:
+        for seg, tier in zip(segments, tiers):
             seg_hash = seg.hash_value
 
             # Create child if not exists
@@ -109,12 +113,14 @@ class SegmentRadixTree:
                     start_idx=seg.start_idx,
                     end_idx=seg.end_idx,
                     num_tokens=len(seg),
-                    storage_tier=storage_tier,
+                    storage_tier=tier,
                     storage_key=f"kv_{seg_hash}",
                 )
                 child.meta = meta
             else:
                 meta = child.meta
+                meta.storage_tier = tier
+                meta.storage_key = f"kv_{seg_hash}"
                 meta.update_access()
 
             child.ref_count += 1

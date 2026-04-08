@@ -87,14 +87,19 @@ class NanoLMCache:
                 if item is None:  # Shutdown signal
                     break
 
-                key, tensor, segment = item
-                success, tier = self.storage.put(key, tensor)
+                segments, kv_slices, preferred_tier = item
+                stored_tiers = []
+                for seg, tensor in zip(segments, kv_slices):
+                    key = f"kv_{seg.hash_value}"
+                    success, actual_tier = self.storage.put(key, tensor, preferred_tier)
+                    if not success:
+                        logger.warning(f"Async write failed: {key}")
+                        break
+                    stored_tiers.append(actual_tier)
 
-                if success:
-                    self.index.insert([segment], tier)
-                    logger.debug(f"Async write: {key} -> {tier.value}")
-                else:
-                    logger.warning(f"Async write failed: {key}")
+                if len(stored_tiers) == len(segments):
+                    self.index.insert(segments, stored_tiers)
+                    logger.debug(f"Async write: stored {len(segments)} segments")
 
             except Exception as e:
                 logger.error(f"Async write error: {e}")
@@ -132,23 +137,26 @@ class NanoLMCache:
         # Slice KV cache for each segment
         kv_slices = self._slice_kv_cache(kv_cache, segments)
 
-        # Store each segment
+        # Store each segment, then index the full segment chain once
         keys = []
+        stored_tiers = []
         for seg, kv_slice in zip(segments, kv_slices):
             key = f"kv_{seg.hash_value}"
+            keys.append(key)
 
             if async_write and self._async_enabled:
-                # Queue for async write
-                cpu_copy = kv_slice.cpu().clone()
-                self._write_queue.put((key, cpu_copy, seg))
-            else:
-                # Sync write
-                success, tier = self.storage.put(key, kv_slice)
-                if success:
-                    self.index.insert([seg], tier)
-                    logger.debug(f"Stored: {key} -> {tier.value}")
+                continue
 
-            keys.append(key)
+            success, tier = self.storage.put(key, kv_slice)
+            if success:
+                stored_tiers.append(tier)
+                logger.debug(f"Stored: {key} -> {tier.value}")
+
+        if async_write and self._async_enabled:
+            cpu_slices = [kv_slice.cpu().clone() for kv_slice in kv_slices]
+            self._write_queue.put((segments, cpu_slices, self.storage.default_tier))
+        elif len(stored_tiers) == len(segments):
+            self.index.insert(segments, stored_tiers)
 
         logger.info(f"Store: {len(tokens)} tokens -> {len(keys)} segments")
         return keys

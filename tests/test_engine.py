@@ -74,6 +74,7 @@ class TestNanoLMCache:
             # Store
             keys = cache.store(tokens, kv)
             assert len(keys) > 0
+            assert len(keys) == 2  # 100 tokens with 50-token segments
 
             # Retrieve
             retrieved, matched = cache.retrieve(tokens)
@@ -81,6 +82,19 @@ class TestNanoLMCache:
             assert matched == 100
             assert retrieved is not None
             assert retrieved.shape[2] == 100  # seq_len dimension
+
+    def test_multi_segment_path_is_indexed(self, config):
+        """Test that multi-segment sequences are indexed as an ordered path."""
+        with NanoLMCache(config) as cache:
+            tokens = list(range(150))
+            kv = make_kv_cache(seq_len=150)
+
+            cache.store(tokens, kv)
+            retrieved, matched = cache.retrieve(tokens)
+
+            assert matched == 150
+            assert retrieved is not None
+            assert retrieved.shape[2] == 150
 
     def test_store_retrieve_prefix(self, config):
         """Test storing and retrieving with prefix match."""
