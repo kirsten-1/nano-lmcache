@@ -133,7 +133,12 @@ def main() -> None:
         )
 
         warm_token_ids = tokenizer(warm_prompt, add_special_tokens=False)["input_ids"]
-        nano_cache.store(warm_token_ids, make_dummy_kv(len(warm_token_ids)), async_write=False)
+        cold_token_ids = tokenizer(cold_prompt, add_special_tokens=False)["input_ids"]
+        nano_cache.store(
+            warm_token_ids,
+            make_dummy_kv(len(warm_token_ids)),
+            async_write=False,
+        )
 
         sampling_params = SamplingParams(
             temperature=0.0,
@@ -143,13 +148,13 @@ def main() -> None:
         print("=" * 60)
         print("Connector dry-run: cold request")
         print("=" * 60)
-        llm.generate([cold_prompt], sampling_params)
+        llm.generate([{"prompt_token_ids": cold_token_ids}], sampling_params)
         llm.llm_engine.do_log_stats()
 
         print("=" * 60)
         print("Connector dry-run: warm request seeded in nano-lmcache")
         print("=" * 60)
-        llm.generate([warm_prompt], sampling_params)
+        llm.generate([{"prompt_token_ids": warm_token_ids}], sampling_params)
         llm.llm_engine.do_log_stats()
 
         print("=" * 60)
