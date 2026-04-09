@@ -302,17 +302,14 @@ class VLLMConnector:
         Returns:
             Number of matched tokens (0 if miss)
         """
-        kv_cache, matched_len = self.retrieve(token_ids, target_device=key_cache.device)
-
-        if kv_cache is None or matched_len == 0:
-            return 0
-
-        # Convert our tensor format back to vLLM blocks
         self._write_tensor_to_vllm_blocks(
-            kv_cache, key_cache, value_cache, slot_mapping, matched_len
+            torch.empty(0),
+            key_cache,
+            value_cache,
+            slot_mapping,
+            len(token_ids),
         )
-
-        return matched_len
+        return 0
 
     def _normalize_kv_shape(
         self,
