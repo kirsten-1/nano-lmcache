@@ -52,6 +52,47 @@ class NanoLMCacheConnectorMetadata(KVConnectorMetadata):
     requests: list[NanoLMCacheConnectorRequestMetadata] = field(default_factory=list)
 
 
+_ENGINE_REGISTRY: dict[str, Any] = {}
+
+
+def register_nano_lmcache_engine(registry_key: str, engine: Any) -> None:
+    """Register a NanoLMCache engine for scheduler-side connector lookup."""
+    _ENGINE_REGISTRY[registry_key] = engine
+
+
+def unregister_nano_lmcache_engine(registry_key: str) -> None:
+    """Remove a previously registered NanoLMCache engine."""
+    _ENGINE_REGISTRY.pop(registry_key, None)
+
+
+def build_vllm_kv_transfer_config(
+    *,
+    registry_key: str,
+    kv_role: str = "kv_both",
+    engine_id: str = "nano-lmcache-v1",
+    connector_name: str = "NanoLMCacheConnectorV1",
+    connector_module_path: str = "nano_lmcache.integration.vllm_v1_connector",
+    kv_connector_extra_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build a vLLM KVTransferConfig-compatible dictionary.
+
+    The actual NanoLMCache engine stays in a local registry. The config only
+    carries a string key so it remains serializable across spawned workers.
+    """
+    extra_config = {
+        "nano_lmcache_registry_key": registry_key,
+    }
+    if kv_connector_extra_config:
+        extra_config.update(kv_connector_extra_config)
+    return {
+        "kv_connector": connector_name,
+        "kv_connector_module_path": connector_module_path,
+        "kv_role": kv_role,
+        "engine_id": engine_id,
+        "kv_connector_extra_config": extra_config,
+    }
+
+
 class NanoLMCacheIndexMatcher:
     """Prefix matcher backed by nano-lmcache's splitter and radix tree."""
 
@@ -208,31 +249,26 @@ class NanoLMCacheConnectorV1(KVConnectorBase_V1):
                 kv_cache_config=kv_cache_config,
             )
 
-        if role is not None and role != KVConnectorRole.SCHEDULER:
-            raise NotImplementedError(
-                "NanoLMCacheConnectorV1 currently implements scheduler-side "
-                "logic only."
-            )
-
         if core is None:
             matcher = matcher or self._extract_matcher(vllm_config)
-            if matcher is None:
+            if role == KVConnectorRole.SCHEDULER and matcher is None:
                 raise ValueError(
                     "NanoLMCacheConnectorV1 requires a matcher or a "
-                    "nano_lmcache_engine/nano_lmcache_matcher entry in "
+                    "nano_lmcache_matcher/nano_lmcache_registry_key entry in "
                     "kv_transfer_config.extra_config."
                 )
-            if block_size is None:
-                block_size = getattr(
-                    getattr(vllm_config, "cache_config", None),
-                    "block_size",
-                    16,
+            if matcher is not None:
+                if block_size is None:
+                    block_size = getattr(
+                        getattr(vllm_config, "cache_config", None),
+                        "block_size",
+                        16,
+                    )
+                core = NanoLMCacheVLLMConnectorCore(
+                    matcher,
+                    block_size=block_size,
+                    load_kv_async=load_kv_async,
                 )
-            core = NanoLMCacheVLLMConnectorCore(
-                matcher,
-                block_size=block_size,
-                load_kv_async=load_kv_async,
-            )
 
         self.core = core
 
@@ -241,6 +277,8 @@ class NanoLMCacheConnectorV1(KVConnectorBase_V1):
         request: Any,
         num_computed_tokens: int,
     ) -> tuple[int | None, bool]:
+        if self.core is None:
+            return 0, False
         return self.core.get_num_new_matched_tokens(request, num_computed_tokens)
 
     def update_state_after_alloc(
@@ -249,12 +287,18 @@ class NanoLMCacheConnectorV1(KVConnectorBase_V1):
         blocks: Any,
         num_external_tokens: int,
     ) -> None:
+        if self.core is None:
+            return
         self.core.update_state_after_alloc(request, blocks, num_external_tokens)
 
     def build_connector_meta(self, scheduler_output: Any) -> NanoLMCacheConnectorMetadata:
+        if self.core is None:
+            return NanoLMCacheConnectorMetadata()
         return self.core.build_connector_meta(scheduler_output)
 
     def update_connector_output(self, connector_output: Any) -> None:
+        if self.core is None:
+            return
         self.core.update_connector_output(connector_output)
 
     def request_finished(
@@ -262,7 +306,27 @@ class NanoLMCacheConnectorV1(KVConnectorBase_V1):
         request: Any,
         block_ids: list[int] | None,
     ) -> tuple[bool, dict[str, Any] | None]:
+        if self.core is None:
+            return False, None
         return self.core.request_finished(request, block_ids)
+
+    def start_load_kv(self, forward_context: Any, **kwargs: Any) -> None:
+        return
+
+    def wait_for_layer_load(self, layer_name: str) -> None:
+        return
+
+    def save_kv_layer(
+        self,
+        layer_name: str,
+        kv_layer: Any,
+        attn_metadata: Any,
+        **kwargs: Any,
+    ) -> None:
+        return
+
+    def wait_for_save(self):
+        return
 
     @staticmethod
     def _extract_matcher(vllm_config: Any) -> NanoLMCacheIndexMatcher | None:
@@ -277,6 +341,12 @@ class NanoLMCacheConnectorV1(KVConnectorBase_V1):
         matcher = get_extra("nano_lmcache_matcher", None)
         if matcher is not None:
             return matcher
+
+        registry_key = get_extra("nano_lmcache_registry_key", None)
+        if registry_key is not None:
+            engine = _ENGINE_REGISTRY.get(registry_key)
+            if engine is not None:
+                return NanoLMCacheIndexMatcher.from_engine(engine)
 
         engine = get_extra("nano_lmcache_engine", None)
         if engine is not None:

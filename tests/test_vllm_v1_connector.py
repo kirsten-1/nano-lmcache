@@ -5,7 +5,12 @@ from types import SimpleNamespace
 from nano_lmcache.index import SegmentRadixTree, StorageTier
 from nano_lmcache.integration.vllm_v1_connector import (
     NanoLMCacheIndexMatcher,
+    NanoLMCacheConnectorV1,
     NanoLMCacheVLLMConnectorCore,
+    KVConnectorRole,
+    build_vllm_kv_transfer_config,
+    register_nano_lmcache_engine,
+    unregister_nano_lmcache_engine,
 )
 from nano_lmcache.segment import SegmentSplitter
 
@@ -145,3 +150,73 @@ def test_core_uses_all_token_ids_for_resumed_cached_requests():
     assert len(meta.requests) == 1
     assert meta.requests[0].token_ids == all_token_ids[:99]
     assert meta.requests[0].matched_token_count == 96
+
+
+def test_connector_can_resolve_matcher_from_registry_key():
+    prefix = list(range(128))
+    matcher = build_cached_matcher(prefix)
+    engine = SimpleNamespace(splitter=matcher._splitter, index=matcher._index)
+    registry_key = "test-engine"
+    register_nano_lmcache_engine(registry_key, engine)
+    try:
+        vllm_config = SimpleNamespace(
+            kv_transfer_config=SimpleNamespace(
+                get_from_extra_config=lambda key, default: (
+                    registry_key if key == "nano_lmcache_registry_key" else default
+                )
+            ),
+            cache_config=SimpleNamespace(block_size=16),
+        )
+        connector = NanoLMCacheConnectorV1(
+            vllm_config=vllm_config,
+            role=KVConnectorRole.SCHEDULER,
+            kv_cache_config=None,
+        )
+        request = make_request("req-5", prefix + [1, 2])
+        new_tokens, load_async = connector.get_num_new_matched_tokens(request, 0)
+        assert new_tokens == 112
+        assert load_async is False
+    finally:
+        unregister_nano_lmcache_engine(registry_key)
+
+
+def test_build_vllm_kv_transfer_config_returns_serializable_shape():
+    config = build_vllm_kv_transfer_config(
+        registry_key="demo-engine",
+        kv_connector_extra_config={"use_async": False},
+    )
+
+    assert config["kv_connector"] == "NanoLMCacheConnectorV1"
+    assert config["kv_connector_module_path"] == (
+        "nano_lmcache.integration.vllm_v1_connector"
+    )
+    assert config["kv_connector_extra_config"]["nano_lmcache_registry_key"] == (
+        "demo-engine"
+    )
+    assert config["kv_connector_extra_config"]["use_async"] is False
+
+
+def test_worker_side_connector_can_be_constructed_as_no_op():
+    vllm_config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            get_from_extra_config=lambda key, default: default
+        ),
+        cache_config=SimpleNamespace(block_size=16),
+    )
+    connector = NanoLMCacheConnectorV1(
+        vllm_config=vllm_config,
+        role=KVConnectorRole.WORKER,
+        kv_cache_config=None,
+    )
+
+    assert connector.get_num_new_matched_tokens(make_request("req-6", [1, 2]), 0) == (
+        0,
+        False,
+    )
+    assert connector.build_connector_meta(
+        make_scheduler_output(
+            new_reqs=[],
+            cached_reqs=SimpleNamespace(req_ids=[], all_token_ids={}, num_computed_tokens=[]),
+            num_scheduled_tokens={},
+        )
+    ).requests == []

@@ -20,7 +20,10 @@ __all__ = [
     "NanoLMCacheVLLMAdapter",
     "NanoLMCacheVLLMConfig",
     "NanoLMCacheVLLMConnectorCore",
+    "build_vllm_kv_transfer_config",
+    "register_nano_lmcache_engine",
     "SchedulerPendingRequest",
+    "unregister_nano_lmcache_engine",
     "VLLMConnector",
     "WorkerConnectorOutput",
 ]
@@ -37,7 +40,10 @@ _SYMBOL_TO_MODULE = {
     "NanoLMCacheVLLMAdapter": ".vllm_v1_adapter",
     "NanoLMCacheVLLMConfig": ".vllm_connector",
     "NanoLMCacheVLLMConnectorCore": ".vllm_v1_connector",
+    "build_vllm_kv_transfer_config": ".vllm_v1_connector",
+    "register_nano_lmcache_engine": ".vllm_v1_connector",
     "SchedulerPendingRequest": ".vllm_v1_adapter",
+    "unregister_nano_lmcache_engine": ".vllm_v1_connector",
     "VLLMConnector": ".vllm_connector",
     "WorkerConnectorOutput": ".vllm_v1_adapter",
 }

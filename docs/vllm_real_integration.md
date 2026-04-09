@@ -9,6 +9,7 @@ This document describes the path from the current benchmark-only setup to a real
 - Native vLLM block-level KV cache conversion is not implemented yet.
 - Runtime probes against vLLM `0.19.0` confirmed that current wins come from vLLM's native scheduler prefix cache path, not from any external connector path.
 - `nano_lmcache.integration.NanoLMCacheVLLMAdapter` now mirrors the `KVConnectorBase_V1` scheduler lifecycle (`matched_tokens -> alloc -> connector_meta -> worker output`) without claiming KV block injection support.
+- `nano_lmcache.integration.NanoLMCacheConnectorV1` now provides a scheduler-side connector core that can be loaded through vLLM's `kv_connector_module_path`.
 
 ## Why the current connector is not fully integrated
 
@@ -62,6 +63,33 @@ Suggested touchpoints in vLLM 0.19:
 - KV cache manager / block table path that knows slot mappings
   `vllm/v1/core/kv_cache_manager.py`
   `vllm/v1/worker/gpu/block_table.py`
+
+### Current scheduler-side connector shape
+
+The current integration path does not require editing vLLM's connector factory.
+vLLM `0.19.0` can dynamically import a connector class when both of these are
+set in `KVTransferConfig`:
+
+- `kv_connector="NanoLMCacheConnectorV1"`
+- `kv_connector_module_path="nano_lmcache.integration.vllm_v1_connector"`
+
+The remaining scheduler-side state is passed by key, not by embedding a live
+engine object in the config. The current helper API is:
+
+```python
+from nano_lmcache.integration import (
+    build_vllm_kv_transfer_config,
+    register_nano_lmcache_engine,
+)
+
+register_nano_lmcache_engine("demo-engine", nano_cache)
+kv_transfer_config = build_vllm_kv_transfer_config(
+    registry_key="demo-engine",
+)
+```
+
+This keeps the config serializable for spawned workers while still letting the
+scheduler-side connector resolve the local `NanoLMCache` engine.
 
 ### Phase 2: block export/import adapter
 
