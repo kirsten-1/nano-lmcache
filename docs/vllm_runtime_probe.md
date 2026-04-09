@@ -9,7 +9,7 @@ It monkeypatches these runtime points:
 - `vllm.v1.core.kv_cache_manager.KVCacheManager.get_computed_blocks`
 - `vllm.v1.core.sched.scheduler.Scheduler.schedule`
 - `vllm.v1.worker.gpu.block_table.BlockTables.compute_slot_mappings`
-- `vllm.v1.worker.gpu.model_runner.GPUModelRunner.prepare_attn`
+- worker `GPUModelRunner.prepare_attn` if the active runner class exposes it
 
 These correspond to:
 
@@ -54,6 +54,15 @@ Lines like:
 
 This tells you how many tokens the native vLLM prefix cache matched before scheduling.
 
+For the current 2048-token prompt experiment, a typical warm hit looked like:
+
+```text
+[nano-vllm-probe] local-prefix-hit req=... prompt_tokens=2085 hit_tokens=2064
+```
+
+That is consistent with block-size `16` alignment and vLLM's rule that the
+last token still needs recomputation for logits.
+
 ### 2. Scheduler accounting
 
 Lines like:
@@ -67,6 +76,10 @@ Important fields:
 - `computed`: total already-available tokens at that point
 - `cached`: tokens counted as prefix-cached by the scheduler
 - `external`: tokens that would come from an external KV connector
+
+For the current probe, `external=0` while `cached=2064`, which shows the speedup
+is coming from vLLM's native local prefix cache path rather than an external
+connector.
 
 ### 3. Worker-side slot mapping
 
