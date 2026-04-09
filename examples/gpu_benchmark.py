@@ -183,6 +183,10 @@ def bench_transfer(sizes_mb: List[float], iterations: int,
         results["cpu_to_gpu_paged"].append({"size_mb": size_mb, "throughput_gbps": round(throughput, 2),
                                             "latency_ms": latency_stats(times)})
 
+        # Clean up tensors between sizes
+        del gpu_t, cpu_p, cpu_pg
+        torch.cuda.empty_cache()
+
     print()
     return {"benchmark": "transfer", **results}
 
@@ -216,6 +220,7 @@ def bench_cache_ops(layers: int, heads: int, head_dim: int,
                 cache.store(wt, wkv, async_write=False)
                 cache.retrieve(wt, target_device="cuda:0")
             cache.clear()
+            del wkv  # Free warmup tensor
 
             store_times: List[float] = []
             retrieve_times: List[float] = []
@@ -233,6 +238,7 @@ def bench_cache_ops(layers: int, heads: int, head_dim: int,
                 torch.cuda.synchronize()
                 store_times.append((time.perf_counter() - t0) * 1000)
 
+                del kv  # Free tensor after storing
                 progress(i, iterations, f"store seq={seq_len}")
 
             # retrieve every stored sequence
@@ -265,6 +271,9 @@ def bench_cache_ops(layers: int, heads: int, head_dim: int,
                 "retrieve_throughput_gbps": round(kv_size_mb / retrieve_avg_s / 1000, 3),
             })
 
+        # Clear GPU cache between seq_len iterations to prevent OOM
+        torch.cuda.empty_cache()
+
     return {"benchmark": "cache_ops", "bytes_per_token": bytes_per_token,
             "scenarios": per_scenario}
 
@@ -291,6 +300,7 @@ def bench_prefix(layers: int, heads: int, head_dim: int,
         prefix_tokens = list(range(prefix_length))
         prefix_kv = make_kv(layers, heads, head_dim, prefix_length)
         cache.store(prefix_tokens, prefix_kv, async_write=False)
+        del prefix_kv  # Free after storing
 
         for suffix_len in suffix_lengths:
             retrieve_times: List[float] = []
@@ -319,6 +329,7 @@ def bench_prefix(layers: int, heads: int, head_dim: int,
                 "retrieve_latency_ms": latency_stats(retrieve_times),
             })
 
+    torch.cuda.empty_cache()
     return {"benchmark": "prefix_hit", "prefix_length": prefix_length,
             "requests": requests, "scenarios": per_suffix}
 
@@ -344,6 +355,7 @@ def bench_tier(layers: int, heads: int, head_dim: int,
         tokens = list(range(seq_len))
         kv = make_kv(layers, heads, head_dim, seq_len)
         cache.store(tokens, kv, async_write=False)
+        del kv  # Free after storing
 
         for _ in range(iterations):
             # demote all to CPU via public API
@@ -365,6 +377,7 @@ def bench_tier(layers: int, heads: int, head_dim: int,
             torch.cuda.synchronize()
             demote_times.append((time.perf_counter() - t0) * 1000)
 
+    torch.cuda.empty_cache()
     kv_size_mb = round(seq_len * 2 * layers * heads * head_dim * 2 / 1e6, 2)
     promote_avg_s = statistics.mean(promote_times) / 1000 if promote_times else 1
     demote_avg_s = statistics.mean(demote_times) / 1000 if demote_times else 1
