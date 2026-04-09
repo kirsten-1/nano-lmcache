@@ -111,6 +111,35 @@ class TestNanoLMCache:
             assert matched > 0
             assert matched <= 100
 
+    def test_short_prefix_regression_with_small_segments(self, temp_dir):
+        """Regression test: 128-token prefixes should match after segment splitting."""
+        config = NanoLMCacheConfig(
+            storage=StorageConfig(
+                cpu_size_gb=0.01,
+                disk_cache_dir=temp_dir,
+                disk_size_gb=0.1,
+                gpu_size_gb=0.0,
+            ),
+            segment=SegmentConfig(
+                max_segment_length=64,
+                min_segment_length=16,
+            ),
+            enable_async_write=False,
+            enable_logging=False,
+        )
+
+        with NanoLMCache(config) as cache:
+            tokens = list(range(128))
+            kv = make_kv_cache(seq_len=128)
+            cache.store(tokens, kv)
+
+            extended_tokens = tokens + list(range(128, 160))
+            retrieved, matched = cache.retrieve(extended_tokens)
+
+            assert matched == 128
+            assert retrieved is not None
+            assert retrieved.shape[2] == 128
+
     def test_retrieve_no_match(self, config):
         """Test retrieval with no match."""
         with NanoLMCache(config) as cache:

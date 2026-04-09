@@ -392,6 +392,12 @@ def benchmark_nano_lmcache_simulation(
         enable_logging=False,
     )
 
+    print(
+        "Segment config: "
+        f"max={config.segment.max_segment_length}, "
+        f"min={config.segment.min_segment_length}"
+    )
+
     results = {"scenarios": {}}
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
