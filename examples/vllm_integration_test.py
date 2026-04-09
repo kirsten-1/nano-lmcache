@@ -85,6 +85,87 @@ Be concise but thorough in your answers.""",
 - Include relevant context and background
 
 Remember: Your goal is to be maximally helpful while maintaining safety and accuracy.""",
+
+    "very_long": """You are an advanced AI assistant developed by a leading AI research organization. Your purpose is to assist users with a comprehensive range of tasks while adhering to strict ethical guidelines and safety protocols.
+
+## Core Identity and Purpose
+
+You are designed to be helpful, harmless, and honest. Your primary function is to assist users in achieving their goals while ensuring that your responses are accurate, safe, and beneficial. You should always strive to provide the most helpful response possible while avoiding any potential harms.
+
+## Comprehensive Capabilities
+
+### Knowledge and Information
+- Extensive knowledge across science, technology, engineering, mathematics, history, arts, literature, philosophy, and current events
+- Ability to explain complex concepts in accessible terms
+- Understanding of multiple languages and cultural contexts
+- Knowledge of academic and professional domains
+
+### Technical Skills
+- Programming and software development in multiple languages (Python, JavaScript, C++, Java, etc.)
+- Code review, debugging, and optimization
+- System design and architecture
+- Database design and query optimization
+- API design and integration
+- DevOps and deployment strategies
+
+### Creative Abilities
+- Writing assistance including essays, articles, stories, and poetry
+- Editing and proofreading
+- Brainstorming and ideation
+- Content strategy and planning
+- Marketing copy and messaging
+
+### Analytical Capabilities
+- Data analysis and interpretation
+- Problem-solving and critical thinking
+- Research and synthesis
+- Logical reasoning and argumentation
+- Mathematical computation and modeling
+
+## Ethical Guidelines and Safety Protocols
+
+### Fundamental Principles
+1. Always prioritize user safety and well-being
+2. Provide accurate information and acknowledge limitations
+3. Respect user privacy and confidentiality
+4. Avoid generating harmful, illegal, or unethical content
+5. Be transparent about being an AI assistant
+
+### Content Policies
+- Do not generate content that promotes violence, hatred, or discrimination
+- Do not assist with illegal activities or harmful actions
+- Do not generate explicit sexual content involving minors
+- Do not provide medical, legal, or financial advice as a substitute for professional consultation
+- Do not impersonate real individuals or create misleading content
+
+### Interaction Guidelines
+- Be respectful and considerate in all interactions
+- Acknowledge uncertainty when appropriate
+- Provide balanced perspectives on controversial topics
+- Encourage users to verify important information
+- Redirect harmful requests toward constructive alternatives
+
+## Response Quality Standards
+
+### Clarity and Organization
+- Use clear, well-structured responses
+- Break down complex topics into digestible sections
+- Use headings, lists, and formatting when helpful
+- Provide examples to illustrate abstract concepts
+
+### Accuracy and Reliability
+- Base responses on factual information
+- Cite sources when possible and appropriate
+- Distinguish between facts, opinions, and speculation
+- Update responses based on new information
+
+### Completeness and Depth
+- Address all aspects of user queries
+- Provide sufficient context and background
+- Offer additional relevant information when helpful
+- Balance thoroughness with conciseness
+
+Remember: Your ultimate goal is to be maximally helpful to users while maintaining the highest standards of safety, accuracy, and ethical conduct. Every interaction is an opportunity to demonstrate the positive potential of AI assistance.""",
 }
 
 USER_QUERIES = [
@@ -298,13 +379,15 @@ def benchmark_nano_lmcache_simulation(
     print(f"KV shape: [{num_layers}, 2, seq_len, {num_heads}, {head_dim}]")
     print(f"{'='*60}\n")
 
+    # Use smaller segment size to ensure short sequences get split
+    # This allows prefix matching even for short system prompts
     config = NanoLMCacheConfig(
         storage=StorageConfig(
             gpu_size_gb=4.0,
             cpu_size_gb=4.0,
             disk_cache_dir="/tmp/nano_lmcache_vllm_test",
         ),
-        segment=SegmentConfig(max_segment_length=256, min_segment_length=64),
+        segment=SegmentConfig(max_segment_length=64, min_segment_length=16),
         enable_async_write=False,
         enable_logging=False,
     )
@@ -436,20 +519,20 @@ def main():
         print("Part 2: vLLM Prefix Caching Comparison")
         print("=" * 60)
 
-        # Test with prefix caching disabled
+        # Test with prefix caching disabled (use long prompt to see effect)
         vllm_no_cache = benchmark_vllm_prefix_caching(
             model_name=args.model,
-            system_prompts={"medium": SYSTEM_PROMPTS["medium"]},
+            system_prompts={"very_long": SYSTEM_PROMPTS["very_long"]},
             user_queries=USER_QUERIES[:num_iterations],
             num_iterations=num_iterations,
             enable_prefix_caching=False,
         )
         results["vllm_no_prefix_cache"] = vllm_no_cache
 
-        # Test with prefix caching enabled
+        # Test with prefix caching enabled (use long prompt to see effect)
         vllm_with_cache = benchmark_vllm_prefix_caching(
             model_name=args.model,
-            system_prompts={"medium": SYSTEM_PROMPTS["medium"]},
+            system_prompts={"very_long": SYSTEM_PROMPTS["very_long"]},
             user_queries=USER_QUERIES[:num_iterations],
             num_iterations=num_iterations,
             enable_prefix_caching=True,
@@ -469,12 +552,12 @@ def main():
         print(f"    Estimated TTFT savings: {data['estimated_prefill_savings_ms']:.1f}ms")
 
     if "vllm_with_prefix_cache" in results:
-        print("\nvLLM Prefix Caching Effect:")
-        no_cache = results["vllm_no_prefix_cache"]["scenarios"]["medium"]
-        with_cache = results["vllm_with_prefix_cache"]["scenarios"]["medium"]
-        print(f"  Without caching: {no_cache['warm_avg_ms']:.1f}ms")
-        print(f"  With caching: {with_cache['warm_avg_ms']:.1f}ms")
-        print(f"  Speedup: {no_cache['warm_avg_ms'] / with_cache['warm_avg_ms']:.2f}x")
+        print("\nvLLM Prefix Caching Effect (very_long system prompt ~1000 tokens):")
+        no_cache = results["vllm_no_prefix_cache"]["scenarios"]["very_long"]
+        with_cache = results["vllm_with_prefix_cache"]["scenarios"]["very_long"]
+        print(f"  Without caching - Cold: {no_cache['cold_avg_ms']:.1f}ms, Warm: {no_cache['warm_avg_ms']:.1f}ms")
+        print(f"  With caching    - Cold: {with_cache['cold_avg_ms']:.1f}ms, Warm: {with_cache['warm_avg_ms']:.1f}ms")
+        print(f"  Warm speedup: {no_cache['warm_avg_ms'] / with_cache['warm_avg_ms']:.2f}x")
 
     print("\nKey Insight:")
     print("  nano-lmcache provides sub-millisecond KV cache retrieval,")
