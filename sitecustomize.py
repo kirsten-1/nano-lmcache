@@ -167,10 +167,19 @@ def _patch_vllm() -> None:
     BlockTables.compute_slot_mappings = wrapped_compute_slot_mappings
 
     for runner_cls in gpu_model_runner_classes:
-        if getattr(runner_cls.prepare_attn, "_nano_probe_wrapped", False):
+        prepare_attn = getattr(runner_cls, "prepare_attn", None)
+        if prepare_attn is None:
+            _emit(
+                "skip-runner-hook "
+                f"runner={runner_cls.__module__}.{runner_cls.__name__} "
+                "reason=no prepare_attn"
+            )
             continue
 
-        original_prepare_attn = runner_cls.prepare_attn
+        if getattr(prepare_attn, "_nano_probe_wrapped", False):
+            continue
+
+        original_prepare_attn = prepare_attn
 
         def wrapped_prepare_attn(self, input_batch, _orig=original_prepare_attn):
             block_tables, slot_mappings = _orig(self, input_batch)
