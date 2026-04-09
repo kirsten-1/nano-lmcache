@@ -59,17 +59,28 @@ def _patch_vllm() -> None:
         from vllm.v1.core.kv_cache_manager import KVCacheManager
         from vllm.v1.core.sched.scheduler import Scheduler
         from vllm.v1.worker.gpu.block_table import BlockTables
-        from vllm.v1.worker.gpu.model_runner import GPUModelRunner
     except Exception as exc:
         _emit(f"probe init failed to import vllm internals: {exc!r}")
         return
+
+    gpu_model_runner_classes = []
+    for module_name in (
+        "vllm.v1.worker.gpu.model_runner",
+        "vllm.v1.worker.gpu_model_runner",
+    ):
+        try:
+            module = __import__(module_name, fromlist=["GPUModelRunner"])
+            cls = getattr(module, "GPUModelRunner", None)
+            if cls is not None:
+                gpu_model_runner_classes.append(cls)
+        except Exception:
+            continue
 
     if getattr(Scheduler.schedule, "_nano_probe_wrapped", False):
         return
 
     original_get_computed_blocks = KVCacheManager.get_computed_blocks
     original_schedule = Scheduler.schedule
-    original_prepare_attn = GPUModelRunner.prepare_attn
     original_compute_slot_mappings = BlockTables.compute_slot_mappings
 
     def wrapped_get_computed_blocks(self, request):
@@ -147,44 +158,52 @@ def _patch_vllm() -> None:
         )
         return slot_mappings
 
-    def wrapped_prepare_attn(self, input_batch):
-        block_tables, slot_mappings = original_prepare_attn(self, input_batch)
-        try:
-            block_preview = []
-            for table in block_tables[:1]:
-                block_preview.append(
-                    _short_list(table[0, : min(8, table.shape[1])].cpu())
-                )
-        except Exception:
-            block_preview = ["<unavailable>"]
-        try:
-            slot_preview = _short_list(
-                slot_mappings[0, : min(12, slot_mappings.shape[1])].cpu()
-            )
-        except Exception:
-            slot_preview = "<unavailable>"
-        _emit(
-            "prepare-attn "
-            f"num_reqs={input_batch.num_reqs} "
-            f"num_tokens={input_batch.num_tokens} "
-            f"query_start_loc={_short_list(input_batch.query_start_loc.cpu())} "
-            f"seq_lens={_short_list(input_batch.seq_lens.cpu())} "
-            f"block_table_shapes={[tuple(t.shape) for t in block_tables]} "
-            f"block_preview={block_preview} "
-            f"slot_shape={tuple(slot_mappings.shape)} "
-            f"slot_preview={slot_preview}"
-        )
-        return block_tables, slot_mappings
-
     wrapped_get_computed_blocks._nano_probe_wrapped = True
     wrapped_schedule._nano_probe_wrapped = True
     wrapped_compute_slot_mappings._nano_probe_wrapped = True
-    wrapped_prepare_attn._nano_probe_wrapped = True
 
     KVCacheManager.get_computed_blocks = wrapped_get_computed_blocks
     Scheduler.schedule = wrapped_schedule
     BlockTables.compute_slot_mappings = wrapped_compute_slot_mappings
-    GPUModelRunner.prepare_attn = wrapped_prepare_attn
+
+    for runner_cls in gpu_model_runner_classes:
+        if getattr(runner_cls.prepare_attn, "_nano_probe_wrapped", False):
+            continue
+
+        original_prepare_attn = runner_cls.prepare_attn
+
+        def wrapped_prepare_attn(self, input_batch, _orig=original_prepare_attn):
+            block_tables, slot_mappings = _orig(self, input_batch)
+            try:
+                block_preview = []
+                for table in block_tables[:1]:
+                    block_preview.append(
+                        _short_list(table[0, : min(8, table.shape[1])].cpu())
+                    )
+            except Exception:
+                block_preview = ["<unavailable>"]
+            try:
+                slot_preview = _short_list(
+                    slot_mappings[0, : min(12, slot_mappings.shape[1])].cpu()
+                )
+            except Exception:
+                slot_preview = "<unavailable>"
+            _emit(
+                "prepare-attn "
+                f"runner={runner_cls.__module__}.{runner_cls.__name__} "
+                f"num_reqs={input_batch.num_reqs} "
+                f"num_tokens={input_batch.num_tokens} "
+                f"query_start_loc={_short_list(input_batch.query_start_loc.cpu())} "
+                f"seq_lens={_short_list(input_batch.seq_lens.cpu())} "
+                f"block_table_shapes={[tuple(t.shape) for t in block_tables]} "
+                f"block_preview={block_preview} "
+                f"slot_shape={tuple(slot_mappings.shape)} "
+                f"slot_preview={slot_preview}"
+            )
+            return block_tables, slot_mappings
+
+        wrapped_prepare_attn._nano_probe_wrapped = True
+        runner_cls.prepare_attn = wrapped_prepare_attn
 
     _emit("vllm probe hooks installed")
 
