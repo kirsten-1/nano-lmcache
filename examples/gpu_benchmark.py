@@ -271,7 +271,10 @@ def bench_cache_ops(layers: int, heads: int, head_dim: int,
                 "retrieve_throughput_gbps": round(kv_size_mb / retrieve_avg_s / 1000, 3),
             })
 
-        # Clear GPU cache between seq_len iterations to prevent OOM
+            # Clear cache before exiting to release GPU memory
+            cache.clear()
+
+        # Clear PyTorch GPU cache between seq_len iterations to prevent OOM
         torch.cuda.empty_cache()
 
     return {"benchmark": "cache_ops", "bytes_per_token": bytes_per_token,

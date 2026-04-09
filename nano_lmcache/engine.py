@@ -360,6 +360,7 @@ class NanoLMCache:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        self.clear()  # Release all cached data
         self.shutdown()
         return False
 
