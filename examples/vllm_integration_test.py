@@ -192,6 +192,51 @@ def count_prompt_tokens(tokenizer: Any, prompt: str) -> int:
     return len(encoded["input_ids"])
 
 
+def build_target_length_prompt(
+    tokenizer: Any,
+    base_prompt: str,
+    target_tokens: int,
+) -> str:
+    """
+    Expand a prompt until it reaches the desired token length.
+
+    We repeat semantically harmless filler text so benchmark inputs can be sized
+    in model tokens instead of guessing from character count.
+    """
+    if target_tokens <= 0:
+        return base_prompt
+
+    prompt = base_prompt.strip()
+    filler = (
+        "\n\nAdditional policy reminder:\n"
+        "- Stay accurate.\n"
+        "- Stay concise when appropriate.\n"
+        "- Explain tradeoffs clearly.\n"
+        "- Preserve context across turns.\n"
+    )
+
+    while count_prompt_tokens(tokenizer, prompt) < target_tokens:
+        prompt += filler
+
+    return prompt
+
+
+def summarize_latency(samples: List[float]) -> Dict[str, float]:
+    """Return stable summary statistics for a latency series."""
+    summary = {
+        "avg_ms": statistics.mean(samples),
+        "median_ms": statistics.median(samples),
+        "min_ms": min(samples),
+        "max_ms": max(samples),
+    }
+    summary["std_ms"] = statistics.stdev(samples) if len(samples) > 1 else 0.0
+
+    steady_samples = samples[1:] if len(samples) > 1 else samples
+    summary["steady_avg_ms"] = statistics.mean(steady_samples)
+    summary["steady_median_ms"] = statistics.median(steady_samples)
+    return summary
+
+
 def measure_ttft(llm: "LLM", prompt: str, sampling_params: "SamplingParams") -> Tuple[float, str]:
     """
     Measure approximate TTFT.
@@ -236,6 +281,7 @@ def benchmark_vllm_prefix_caching(
     num_iterations: int = 5,
     max_tokens: int = 1,
     enable_prefix_caching: bool = True,
+    target_system_prompt_tokens: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Benchmark vLLM's built-in prefix caching.
@@ -247,6 +293,7 @@ def benchmark_vllm_prefix_caching(
         num_iterations: Number of iterations per scenario
         max_tokens: Max output tokens
         enable_prefix_caching: Whether to enable vLLM's prefix caching
+        target_system_prompt_tokens: Optional token target for an expanded prompt
 
     Returns:
         Benchmark results
@@ -282,6 +329,13 @@ def benchmark_vllm_prefix_caching(
     }
 
     for prompt_name, system_prompt in system_prompts.items():
+        if target_system_prompt_tokens is not None:
+            system_prompt = build_target_length_prompt(
+                tokenizer,
+                system_prompt,
+                target_system_prompt_tokens,
+            )
+
         print(f"\n--- System prompt: {prompt_name} ({len(system_prompt)} chars) ---")
         system_prompt_tokens = count_prompt_tokens(
             tokenizer,
@@ -325,17 +379,32 @@ def benchmark_vllm_prefix_caching(
             print(f"  Warm start {i+1}: {ttft:.1f}ms")
 
         # Calculate statistics
-        cold_avg = statistics.mean(scenario_results["cold_start"])
-        warm_avg = statistics.mean(scenario_results["warm_start"])
-        speedup = cold_avg / warm_avg if warm_avg > 0 else 0
+        cold_summary = summarize_latency(scenario_results["cold_start"])
+        warm_summary = summarize_latency(scenario_results["warm_start"])
+        speedup = (
+            cold_summary["avg_ms"] / warm_summary["avg_ms"]
+            if warm_summary["avg_ms"] > 0
+            else 0
+        )
+        steady_speedup = (
+            cold_summary["steady_avg_ms"] / warm_summary["steady_avg_ms"]
+            if warm_summary["steady_avg_ms"] > 0
+            else 0
+        )
 
-        scenario_results["cold_avg_ms"] = cold_avg
-        scenario_results["warm_avg_ms"] = warm_avg
+        scenario_results["cold_summary"] = cold_summary
+        scenario_results["warm_summary"] = warm_summary
+        scenario_results["cold_avg_ms"] = cold_summary["avg_ms"]
+        scenario_results["warm_avg_ms"] = warm_summary["avg_ms"]
         scenario_results["speedup"] = speedup
+        scenario_results["steady_speedup"] = steady_speedup
 
-        print(f"\n  Cold avg: {cold_avg:.1f}ms")
-        print(f"  Warm avg: {warm_avg:.1f}ms")
+        print(f"\n  Cold avg: {cold_summary['avg_ms']:.1f}ms (median {cold_summary['median_ms']:.1f}ms)")
+        print(f"  Warm avg: {warm_summary['avg_ms']:.1f}ms (median {warm_summary['median_ms']:.1f}ms)")
+        print(f"  Cold std: {cold_summary['std_ms']:.1f}ms")
+        print(f"  Warm std: {warm_summary['std_ms']:.1f}ms")
         print(f"  Speedup:  {speedup:.2f}x")
+        print(f"  Steady-state speedup (drop first sample): {steady_speedup:.2f}x")
 
         results["scenarios"][prompt_name] = scenario_results
 
@@ -484,13 +553,21 @@ def main():
                         help="Model to test")
     parser.add_argument("--quick", action="store_true",
                         help="Quick test with fewer iterations")
+    parser.add_argument("--iterations", type=int, default=None,
+                        help="Override number of benchmark iterations")
     parser.add_argument("--skip-vllm", action="store_true",
                         help="Skip vLLM benchmark, only run nano-lmcache")
+    parser.add_argument("--skip-nano", action="store_true",
+                        help="Skip nano-lmcache simulation, only run vLLM benchmark")
+    parser.add_argument("--vllm-output-tokens", type=int, default=1,
+                        help="Number of output tokens for the vLLM benchmark")
+    parser.add_argument("--target-system-prompt-tokens", type=int, default=2048,
+                        help="Target token length for the long vLLM system prompt")
     parser.add_argument("--json", type=str, default=None,
                         help="Output JSON file")
     args = parser.parse_args()
 
-    num_iterations = 3 if args.quick else 5
+    num_iterations = args.iterations if args.iterations is not None else (3 if args.quick else 5)
 
     print("=" * 60)
     print("vLLM + nano-lmcache Integration Test")
@@ -508,20 +585,21 @@ def main():
         "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "N/A",
     }
 
-    # Benchmark nano-lmcache KV operations
-    print("\n" + "=" * 60)
-    print("Part 1: nano-lmcache KV Cache Performance")
-    print("=" * 60)
+    nano_results = {"scenarios": {}}
+    if not args.skip_nano:
+        print("\n" + "=" * 60)
+        print("Part 1: nano-lmcache KV Cache Performance")
+        print("=" * 60)
 
-    nano_results = benchmark_nano_lmcache_simulation(
-        num_layers=32,
-        num_heads=8,  # GQA: 8 KV heads for 7B model
-        head_dim=128,
-        system_prompt_tokens=[128, 512, 1024, 2048],
-        user_query_tokens=[32, 64, 128] * num_iterations,
-        num_iterations=num_iterations,
-    )
-    results["nano_lmcache"] = nano_results
+        nano_results = benchmark_nano_lmcache_simulation(
+            num_layers=32,
+            num_heads=8,  # GQA: 8 KV heads for 7B model
+            head_dim=128,
+            system_prompt_tokens=[128, 512, 1024, 2048],
+            user_query_tokens=[32, 64, 128] * num_iterations,
+            num_iterations=num_iterations,
+        )
+        results["nano_lmcache"] = nano_results
 
     # Benchmark vLLM (if available and not skipped)
     if VLLM_AVAILABLE and not args.skip_vllm:
@@ -535,7 +613,9 @@ def main():
             system_prompts={"very_long": SYSTEM_PROMPTS["very_long"]},
             user_queries=USER_QUERIES[:num_iterations],
             num_iterations=num_iterations,
+            max_tokens=args.vllm_output_tokens,
             enable_prefix_caching=False,
+            target_system_prompt_tokens=args.target_system_prompt_tokens,
         )
         results["vllm_no_prefix_cache"] = vllm_no_cache
 
@@ -545,7 +625,9 @@ def main():
             system_prompts={"very_long": SYSTEM_PROMPTS["very_long"]},
             user_queries=USER_QUERIES[:num_iterations],
             num_iterations=num_iterations,
+            max_tokens=args.vllm_output_tokens,
             enable_prefix_caching=True,
+            target_system_prompt_tokens=args.target_system_prompt_tokens,
         )
         results["vllm_with_prefix_cache"] = vllm_with_cache
 
@@ -554,20 +636,26 @@ def main():
     print("Summary")
     print("=" * 60)
 
-    print("\nnano-lmcache KV Cache Performance:")
-    for scenario, data in nano_results["scenarios"].items():
-        print(f"  {scenario}:")
-        print(f"    Store: {data['store_time_ms']:.2f}ms")
-        print(f"    Retrieve: {data['avg_retrieve_time_ms']:.2f}ms")
-        print(f"    Estimated TTFT savings: {data['estimated_prefill_savings_ms']:.1f}ms")
+    if nano_results["scenarios"]:
+        print("\nnano-lmcache KV Cache Performance:")
+        for scenario, data in nano_results["scenarios"].items():
+            print(f"  {scenario}:")
+            print(f"    Store: {data['store_time_ms']:.2f}ms")
+            print(f"    Retrieve: {data['avg_retrieve_time_ms']:.2f}ms")
+            print(f"    Estimated TTFT savings: {data['estimated_prefill_savings_ms']:.1f}ms")
 
     if "vllm_with_prefix_cache" in results:
-        print("\nvLLM Prefix Caching Effect (very_long system prompt ~1000 tokens):")
+        print("\nvLLM Prefix Caching Effect:")
         no_cache = results["vllm_no_prefix_cache"]["scenarios"]["very_long"]
         with_cache = results["vllm_with_prefix_cache"]["scenarios"]["very_long"]
+        print(f"  System prompt tokens: ~{with_cache['system_prompt_tokens']}")
         print(f"  Without caching - Cold: {no_cache['cold_avg_ms']:.1f}ms, Warm: {no_cache['warm_avg_ms']:.1f}ms")
         print(f"  With caching    - Cold: {with_cache['cold_avg_ms']:.1f}ms, Warm: {with_cache['warm_avg_ms']:.1f}ms")
         print(f"  Warm speedup: {no_cache['warm_avg_ms'] / with_cache['warm_avg_ms']:.2f}x")
+        print(
+            "  Warm steady-state speedup: "
+            f"{no_cache['warm_summary']['steady_avg_ms'] / with_cache['warm_summary']['steady_avg_ms']:.2f}x"
+        )
 
     print("\nKey Insight:")
     print("  nano-lmcache provides sub-millisecond KV cache retrieval,")

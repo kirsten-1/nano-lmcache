@@ -21,7 +21,7 @@ Usage:
     cached_kv, matched_len = connector.retrieve(token_ids)
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Optional, Tuple, Dict, Any
 import torch
 import logging
@@ -64,6 +64,19 @@ class NanoLMCacheVLLMConfig:
     # vLLM specific
     block_size: int = 16          # vLLM block size
     gpu_device: str = "cuda:0"
+
+
+@dataclass
+class VLLMIntegrationStatus:
+    """Describe which connector paths are actually implemented."""
+
+    direct_tensor_store_supported: bool = True
+    direct_tensor_retrieve_supported: bool = True
+    vllm_block_conversion_supported: bool = False
+    notes: str = (
+        "Direct tensor KV cache storage is supported. "
+        "Native vLLM block conversion still requires version-specific runtime hooks."
+    )
 
 
 class VLLMConnector:
@@ -117,6 +130,7 @@ class VLLMConnector:
 
         # Initialize cache engine
         self.cache = NanoLMCache(cache_config)
+        self._status = VLLMIntegrationStatus()
 
         # Statistics
         self._stats = {
@@ -173,6 +187,15 @@ class VLLMConnector:
         self._stats["total_tokens_stored"] += len(token_ids)
 
         return keys
+
+    def integration_status(self) -> Dict[str, Any]:
+        """Return which integration paths are implemented."""
+        return {
+            "direct_tensor_store_supported": self._status.direct_tensor_store_supported,
+            "direct_tensor_retrieve_supported": self._status.direct_tensor_retrieve_supported,
+            "vllm_block_conversion_supported": self._status.vllm_block_conversion_supported,
+            "notes": self._status.notes,
+        }
 
     def retrieve(
         self,
@@ -317,31 +340,13 @@ class VLLMConnector:
         """
         Convert vLLM block format to our tensor format.
 
-        This is a simplified implementation. The actual conversion depends on
-        vLLM's exact memory layout which varies by version.
+        This conversion is version-specific and is not implemented yet.
         """
-        device = key_cache.device
-        dtype = key_cache.dtype
-
-        num_layers = self.config.num_layers
-        num_kv_heads = self.config.num_kv_heads
-        head_dim = self.config.head_dim
-
-        # Allocate output tensor
-        kv_cache = torch.zeros(
-            num_layers, 2, seq_len, num_kv_heads, head_dim,
-            device=device, dtype=dtype,
+        raise NotImplementedError(
+            "vLLM block-to-tensor conversion is not implemented yet. "
+            "Use direct tensor store/retrieve APIs or provide version-specific "
+            "runtime hooks for vLLM's KV cache layout."
         )
-
-        # This is a placeholder - actual implementation depends on vLLM version
-        # For vLLM v0.4+, the block layout is:
-        # key: [num_blocks, num_kv_heads, head_dim // x, block_size, x]
-        # value: [num_blocks, num_kv_heads, head_dim, block_size]
-
-        logger.debug(f"Converting vLLM blocks to tensor: seq_len={seq_len}")
-
-        # For now, return zeros (actual implementation needs vLLM internals)
-        return kv_cache
 
     def _write_tensor_to_vllm_blocks(
         self,
@@ -354,11 +359,12 @@ class VLLMConnector:
         """
         Write our tensor format to vLLM blocks.
 
-        This is a simplified implementation.
+        This conversion is version-specific and is not implemented yet.
         """
-        # Placeholder - actual implementation needs vLLM internals
-        logger.debug(f"Writing tensor to vLLM blocks: seq_len={seq_len}")
-        pass
+        raise NotImplementedError(
+            "Writing tensor KV cache back into vLLM block storage is not implemented yet. "
+            "A version-specific adapter is required for the active vLLM runtime."
+        )
 
     def stats(self) -> Dict[str, Any]:
         """Get connector statistics."""
@@ -382,6 +388,7 @@ class VLLMConnector:
                 "hit_rate": hit_rate,
                 "token_hit_rate": token_hit_rate,
             },
+            "integration_status": self.integration_status(),
             "cache": cache_stats,
         }
 

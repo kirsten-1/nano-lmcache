@@ -160,8 +160,9 @@ def demo_with_vllm():
         return
 
     print("\n=== vLLM Integration Demo ===")
-    # This would be the actual vLLM integration
-    # For now, we show the intended usage pattern
+    # This is the intended integration shape. Direct tensor KV cache paths are
+    # implemented, but native block-level integration still needs version-
+    # specific hooks into vLLM internals.
 
     print("""
     # Intended usage with vLLM:
@@ -185,13 +186,18 @@ def demo_with_vllm():
 
     if matched_len > 0:
         # Use cached KV for prefix
-        # (requires custom vLLM integration)
+        # (requires custom vLLM runtime integration)
         pass
 
     # After inference, store KV cache
-    # (requires access to vLLM's internal KV cache)
+    # (requires access to vLLM's internal KV cache tensors)
     connector.store(tokens, kv_cache)
     """)
+
+    status = VLLMConnector().integration_status()
+    print("Current connector status:")
+    for key, value in status.items():
+        print(f"  {key}: {value}")
 
 
 def main():
