@@ -20,6 +20,7 @@ try:
         KVConnectorMetadata,
         KVConnectorRole,
     )
+    from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 except Exception:  # pragma: no cover - exercised only without vLLM installed.
     class KVConnectorMetadata:  # type: ignore[no-redef]
         """Fallback metadata base when vLLM is not importable."""
@@ -30,7 +31,18 @@ except Exception:  # pragma: no cover - exercised only without vLLM installed.
 
     class KVConnectorBase_V1:  # type: ignore[no-redef]
         def __init__(self, *args: Any, **kwargs: Any):
+            self._connector_metadata = None
             return
+
+        def bind_connector_metadata(self, connector_metadata: Any) -> None:
+            self._connector_metadata = connector_metadata
+
+        def clear_connector_metadata(self) -> None:
+            self._connector_metadata = None
+
+    @dataclass
+    class KVConnectorStats:  # type: ignore[no-redef]
+        data: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -41,6 +53,7 @@ class NanoLMCacheConnectorRequestMetadata:
     token_ids: list[int]
     block_ids: tuple[list[int], ...]
     matched_token_count: int
+    candidate_token_count: int
     is_store: bool
     load_kv_async: bool = False
 
@@ -50,6 +63,28 @@ class NanoLMCacheConnectorMetadata(KVConnectorMetadata):
     """Metadata emitted by the scheduler-side connector."""
 
     requests: list[NanoLMCacheConnectorRequestMetadata] = field(default_factory=list)
+
+
+@dataclass
+class NanoLMCacheConnectorStats(KVConnectorStats):
+    """Simple serializable connector stats for dry-run observability."""
+
+    data: dict[str, Any] = field(default_factory=dict)
+
+    def reset(self):
+        self.data.clear()
+
+    def aggregate(self, other: "NanoLMCacheConnectorStats") -> "NanoLMCacheConnectorStats":
+        merged = dict(self.data)
+        for key, value in other.data.items():
+            merged[key] = merged.get(key, 0) + value
+        return NanoLMCacheConnectorStats(data=merged)
+
+    def reduce(self) -> dict[str, int | float]:
+        return dict(self.data)
+
+    def is_empty(self) -> bool:
+        return not self.data
 
 
 _ENGINE_REGISTRY: dict[str, Any] = {}
@@ -72,6 +107,7 @@ def build_vllm_kv_transfer_config(
     engine_id: str = "nano-lmcache-v1",
     connector_name: str = "NanoLMCacheConnectorV1",
     connector_module_path: str = "nano_lmcache.integration.vllm_v1_connector",
+    enable_external_matching: bool = False,
     kv_connector_extra_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a vLLM KVTransferConfig-compatible dictionary.
@@ -81,6 +117,7 @@ def build_vllm_kv_transfer_config(
     """
     extra_config = {
         "nano_lmcache_registry_key": registry_key,
+        "nano_lmcache_enable_external_matching": enable_external_matching,
     }
     if kv_connector_extra_config:
         extra_config.update(kv_connector_extra_config)
@@ -124,12 +161,15 @@ class NanoLMCacheVLLMConnectorCore:
         *,
         block_size: int = 16,
         load_kv_async: bool = False,
+        enable_external_matching: bool = False,
     ):
         self.matcher = matcher
         self.block_size = block_size
         self.load_kv_async = load_kv_async
+        self.enable_external_matching = enable_external_matching
         self.adapter = NanoLMCacheVLLMAdapter(block_size=block_size)
         self._requests: dict[str, Any] = {}
+        self._candidate_tokens: dict[str, int] = {}
 
     def get_num_new_matched_tokens(
         self,
@@ -149,8 +189,12 @@ class NanoLMCacheVLLMConnectorCore:
             load_kv_async=self.load_kv_async,
         )
         self._requests[request.request_id] = request
-        return result.new_external_tokens, (
-            self.load_kv_async and result.new_external_tokens > 0
+        self._candidate_tokens[request.request_id] = result.new_external_tokens
+        actual_external_tokens = (
+            result.new_external_tokens if self.enable_external_matching else 0
+        )
+        return actual_external_tokens, (
+            self.load_kv_async and actual_external_tokens > 0
         )
 
     def update_state_after_alloc(
@@ -185,6 +229,10 @@ class NanoLMCacheVLLMConnectorCore:
                     token_ids=token_ids,
                     block_ids=metadata.block_ids,
                     matched_token_count=metadata.matched_tokens,
+                    candidate_token_count=self._candidate_tokens.get(
+                        metadata.request_id,
+                        metadata.matched_tokens,
+                    ),
                     is_store=metadata.is_store,
                     load_kv_async=metadata.load_kv_async,
                 )
@@ -200,6 +248,7 @@ class NanoLMCacheVLLMConnectorCore:
         block_ids: list[int] | None,
     ) -> tuple[bool, dict[str, Any] | None]:
         self._requests.pop(request.request_id, None)
+        self._candidate_tokens.pop(request.request_id, None)
         return self.adapter.request_finished(request.request_id, block_ids)
 
     def _resolve_token_ids(self, request_id: str, scheduler_output: Any) -> list[int]:
@@ -268,9 +317,13 @@ class NanoLMCacheConnectorV1(KVConnectorBase_V1):
                     matcher,
                     block_size=block_size,
                     load_kv_async=load_kv_async,
+                    enable_external_matching=self._get_enable_external_matching(
+                        vllm_config
+                    ),
                 )
 
         self.core = core
+        self._last_stats = NanoLMCacheConnectorStats()
 
     def get_num_new_matched_tokens(
         self,
@@ -328,6 +381,38 @@ class NanoLMCacheConnectorV1(KVConnectorBase_V1):
     def wait_for_save(self):
         return
 
+    def get_kv_connector_stats(self) -> NanoLMCacheConnectorStats | None:
+        metadata = self._connector_metadata
+        if not isinstance(metadata, NanoLMCacheConnectorMetadata):
+            return None
+
+        total_candidate_tokens = sum(
+            request.candidate_token_count for request in metadata.requests
+        )
+        total_actual_tokens = sum(
+            request.matched_token_count for request in metadata.requests
+        )
+        matched_reqs = sum(
+            1 for request in metadata.requests if request.candidate_token_count > 0
+        )
+        stats = NanoLMCacheConnectorStats(
+            data={
+                "nano_lmcache_candidate_tokens": total_candidate_tokens,
+                "nano_lmcache_actual_external_tokens": total_actual_tokens,
+                "nano_lmcache_matched_requests": matched_reqs,
+            }
+        )
+        self._last_stats = stats
+        return stats if not stats.is_empty() else None
+
+    @classmethod
+    def build_kv_connector_stats(
+        cls, data: dict[str, Any] | None = None
+    ) -> NanoLMCacheConnectorStats | None:
+        if not data:
+            return None
+        return NanoLMCacheConnectorStats(data=dict(data))
+
     @staticmethod
     def _extract_matcher(vllm_config: Any) -> NanoLMCacheIndexMatcher | None:
         if vllm_config is None or getattr(vllm_config, "kv_transfer_config", None) is None:
@@ -353,3 +438,12 @@ class NanoLMCacheConnectorV1(KVConnectorBase_V1):
             return NanoLMCacheIndexMatcher.from_engine(engine)
 
         return None
+
+    @staticmethod
+    def _get_enable_external_matching(vllm_config: Any) -> bool:
+        if vllm_config is None or getattr(vllm_config, "kv_transfer_config", None) is None:
+            return False
+        get_extra = getattr(vllm_config.kv_transfer_config, "get_from_extra_config", None)
+        if get_extra is None:
+            return False
+        return bool(get_extra("nano_lmcache_enable_external_matching", False))

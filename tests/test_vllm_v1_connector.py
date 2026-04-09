@@ -58,7 +58,7 @@ def test_core_uses_segment_radix_tree_for_prefix_matching():
     request = make_request("req-1", prefix + [999, 1000])
     new_tokens, load_async = core.get_num_new_matched_tokens(request, 0)
 
-    assert new_tokens == 112
+    assert new_tokens == 0
     assert load_async is False
 
 
@@ -69,7 +69,7 @@ def test_core_builds_load_metadata_for_new_requests():
 
     request = make_request("req-2", prefix + [999, 1000])
     core.get_num_new_matched_tokens(request, 0)
-    core.update_state_after_alloc(request, FakeBlocks(([20, 21, 22, 23, 24, 25, 26, 27],)), 112)
+    core.update_state_after_alloc(request, FakeBlocks(([20, 21, 22, 23, 24, 25, 26, 27],)), 0)
 
     scheduler_output = make_scheduler_output(
         new_reqs=[
@@ -83,15 +83,16 @@ def test_core_builds_load_metadata_for_new_requests():
             all_token_ids={},
             num_computed_tokens=[],
         ),
-        num_scheduled_tokens={"req-2": len(request.prompt_token_ids) - 112},
+        num_scheduled_tokens={"req-2": len(request.prompt_token_ids)},
     )
 
     meta = core.build_connector_meta(scheduler_output)
 
     assert len(meta.requests) == 1
     assert meta.requests[0].request_id == "req-2"
-    assert meta.requests[0].matched_token_count == 112
-    assert meta.requests[0].is_store is False
+    assert meta.requests[0].matched_token_count == 0
+    assert meta.requests[0].candidate_token_count == 112
+    assert meta.requests[0].is_store is True
     assert meta.requests[0].token_ids == request.prompt_token_ids
 
 
@@ -122,6 +123,7 @@ def test_core_builds_store_metadata_when_no_external_match_exists():
 
     assert len(meta.requests) == 1
     assert meta.requests[0].matched_token_count == 0
+    assert meta.requests[0].candidate_token_count == 0
     assert meta.requests[0].is_store is True
 
 
@@ -133,7 +135,7 @@ def test_core_uses_all_token_ids_for_resumed_cached_requests():
 
     request = make_request("req-4", prefix, all_token_ids=all_token_ids)
     core.get_num_new_matched_tokens(request, 0)
-    core.update_state_after_alloc(request, FakeBlocks(([30, 31, 32, 33, 34, 35, 36, 37],)), 96)
+    core.update_state_after_alloc(request, FakeBlocks(([30, 31, 32, 33, 34, 35, 36, 37],)), 0)
 
     scheduler_output = make_scheduler_output(
         new_reqs=[],
@@ -149,7 +151,8 @@ def test_core_uses_all_token_ids_for_resumed_cached_requests():
 
     assert len(meta.requests) == 1
     assert meta.requests[0].token_ids == all_token_ids[:99]
-    assert meta.requests[0].matched_token_count == 96
+    assert meta.requests[0].matched_token_count == 0
+    assert meta.requests[0].candidate_token_count == 96
 
 
 def test_connector_can_resolve_matcher_from_registry_key():
@@ -174,7 +177,7 @@ def test_connector_can_resolve_matcher_from_registry_key():
         )
         request = make_request("req-5", prefix + [1, 2])
         new_tokens, load_async = connector.get_num_new_matched_tokens(request, 0)
-        assert new_tokens == 112
+        assert new_tokens == 0
         assert load_async is False
     finally:
         unregister_nano_lmcache_engine(registry_key)
@@ -193,6 +196,7 @@ def test_build_vllm_kv_transfer_config_returns_serializable_shape():
     assert config["kv_connector_extra_config"]["nano_lmcache_registry_key"] == (
         "demo-engine"
     )
+    assert config["kv_connector_extra_config"]["nano_lmcache_enable_external_matching"] is False
     assert config["kv_connector_extra_config"]["use_async"] is False
 
 
@@ -220,3 +224,44 @@ def test_worker_side_connector_can_be_constructed_as_no_op():
             num_scheduled_tokens={},
         )
     ).requests == []
+
+
+def test_can_enable_actual_external_matching_explicitly():
+    prefix = list(range(128))
+    matcher = build_cached_matcher(prefix)
+    core = NanoLMCacheVLLMConnectorCore(
+        matcher,
+        block_size=16,
+        enable_external_matching=True,
+    )
+
+    request = make_request("req-7", prefix + [1, 2])
+    new_tokens, load_async = core.get_num_new_matched_tokens(request, 0)
+
+    assert new_tokens == 112
+    assert load_async is False
+
+
+def test_worker_stats_report_candidate_tokens_from_bound_metadata():
+    from nano_lmcache.integration.vllm_v1_connector import NanoLMCacheConnectorMetadata
+
+    connector = NanoLMCacheConnectorV1(core=None)
+    connector.bind_connector_metadata(SimpleNamespace(requests=[]))
+
+    assert connector.get_kv_connector_stats() is None
+
+    connector.bind_connector_metadata(
+        NanoLMCacheConnectorMetadata(
+        requests=[
+            SimpleNamespace(candidate_token_count=112, matched_token_count=0),
+            SimpleNamespace(candidate_token_count=0, matched_token_count=0),
+        ]
+        )
+    )
+
+    stats = connector.get_kv_connector_stats()
+
+    assert stats is not None
+    assert stats.data["nano_lmcache_candidate_tokens"] == 112
+    assert stats.data["nano_lmcache_actual_external_tokens"] == 0
+    assert stats.data["nano_lmcache_matched_requests"] == 1

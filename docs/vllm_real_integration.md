@@ -91,6 +91,25 @@ kv_transfer_config = build_vllm_kv_transfer_config(
 This keeps the config serializable for spawned workers while still letting the
 scheduler-side connector resolve the local `NanoLMCache` engine.
 
+By default, this helper keeps the connector in a dry-run-safe mode:
+
+- candidate external matches are still computed from nano-lmcache
+- worker-side connector stats can report those candidate hits
+- but the scheduler does **not** yet skip token computation based on them
+
+That default exists because worker-side KV block injection is not implemented
+yet. To let the scheduler actually consume external matched tokens, the config
+must explicitly opt in with:
+
+```python
+kv_transfer_config = build_vllm_kv_transfer_config(
+    registry_key="demo-engine",
+    enable_external_matching=True,
+)
+```
+
+Do not enable that in production until worker-side KV load/store is wired up.
+
 ### Phase 2: block export/import adapter
 
 Goal: implement a version-specific adapter layer:
