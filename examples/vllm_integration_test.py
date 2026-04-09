@@ -186,38 +186,29 @@ USER_QUERIES = [
 # Benchmark utilities
 # ---------------------------------------------------------------------------
 
+def count_prompt_tokens(tokenizer: Any, prompt: str) -> int:
+    """Count prompt tokens using the model tokenizer."""
+    encoded = tokenizer(prompt, add_special_tokens=False)
+    return len(encoded["input_ids"])
+
+
 def measure_ttft(llm: "LLM", prompt: str, sampling_params: "SamplingParams") -> Tuple[float, str]:
     """
-    Measure Time To First Token (TTFT).
+    Measure approximate TTFT.
+
+    We use max_tokens=1 in the benchmark so end-to-end latency is a close
+    approximation of TTFT and is not dominated by decode time.
 
     Returns:
         (ttft_ms, output_text)
     """
     start = time.perf_counter()
-
-    # Generate with streaming to measure TTFT
     outputs = llm.generate([prompt], sampling_params)
-
-    # For non-streaming, we measure total time / output_tokens as approximation
-    # Real TTFT requires streaming API
     end = time.perf_counter()
 
     output = outputs[0]
     output_text = output.outputs[0].text
-    num_output_tokens = len(output.outputs[0].token_ids)
-
-    # Approximate TTFT: (total_time - decode_time) where decode_time ≈ output_tokens * per_token_time
-    total_ms = (end - start) * 1000
-
-    # For short outputs, total time ≈ prefill time (TTFT)
-    # For longer outputs, we estimate decode time
-    if num_output_tokens < 10:
-        ttft_ms = total_ms
-    else:
-        # Rough estimate: decode is ~20ms per token on average
-        estimated_decode_ms = num_output_tokens * 15
-        ttft_ms = max(total_ms - estimated_decode_ms, total_ms * 0.3)
-
+    ttft_ms = (end - start) * 1000
     return ttft_ms, output_text
 
 
@@ -243,7 +234,7 @@ def benchmark_vllm_prefix_caching(
     system_prompts: Dict[str, str],
     user_queries: List[str],
     num_iterations: int = 5,
-    max_tokens: int = 50,
+    max_tokens: int = 1,
     enable_prefix_caching: bool = True,
 ) -> Dict[str, Any]:
     """
@@ -276,12 +267,13 @@ def benchmark_vllm_prefix_caching(
     )
 
     sampling_params = SamplingParams(
-        temperature=0.7,
+        temperature=0.0,
         max_tokens=max_tokens,
     )
 
     # Get model type for prompt formatting
     model_type = model_name.lower()
+    tokenizer = llm.get_tokenizer()
 
     results = {
         "model": model_name,
@@ -291,9 +283,15 @@ def benchmark_vllm_prefix_caching(
 
     for prompt_name, system_prompt in system_prompts.items():
         print(f"\n--- System prompt: {prompt_name} ({len(system_prompt)} chars) ---")
+        system_prompt_tokens = count_prompt_tokens(
+            tokenizer,
+            format_prompt(system_prompt, "", model_type),
+        )
+        print(f"  Tokenized system prompt: ~{system_prompt_tokens} tokens")
 
         scenario_results = {
             "system_prompt_length": len(system_prompt),
+            "system_prompt_tokens": system_prompt_tokens,
             "cold_start": [],
             "warm_start": [],
         }
@@ -307,6 +305,9 @@ def benchmark_vllm_prefix_caching(
 
             ttft, _ = measure_ttft(llm, prompt, sampling_params)
             scenario_results["cold_start"].append(ttft)
+            if i == 0:
+                cold_prompt_tokens = count_prompt_tokens(tokenizer, prompt)
+                print(f"  Cold prompt length: ~{cold_prompt_tokens} tokens")
             print(f"  Cold start {i+1}: {ttft:.1f}ms")
 
         # Warm start: Same system prompt, different queries
@@ -318,6 +319,9 @@ def benchmark_vllm_prefix_caching(
 
             ttft, _ = measure_ttft(llm, prompt, sampling_params)
             scenario_results["warm_start"].append(ttft)
+            if i == 0:
+                warm_prompt_tokens = count_prompt_tokens(tokenizer, prompt)
+                print(f"  Warm prompt length: ~{warm_prompt_tokens} tokens")
             print(f"  Warm start {i+1}: {ttft:.1f}ms")
 
         # Calculate statistics
