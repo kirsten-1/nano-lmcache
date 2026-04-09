@@ -197,6 +197,7 @@ def test_build_vllm_kv_transfer_config_returns_serializable_shape():
         "demo-engine"
     )
     assert config["kv_connector_extra_config"]["nano_lmcache_enable_external_matching"] is False
+    assert config["kv_connector_extra_config"]["nano_lmcache_probe"] is False
     assert config["kv_connector_extra_config"]["use_async"] is False
 
 

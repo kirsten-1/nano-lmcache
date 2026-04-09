@@ -110,6 +110,30 @@ kv_transfer_config = build_vllm_kv_transfer_config(
 
 Do not enable that in production until worker-side KV load/store is wired up.
 
+## Dry-run runtime validation
+
+The repo now includes a dry-run runtime example:
+
+- [vllm_connector_dry_run.py](/Users/apple/Documents/AI/nano-lmcache/examples/vllm_connector_dry_run.py)
+
+It mounts `NanoLMCacheConnectorV1` into a real vLLM run, seeds nano-lmcache
+with a prompt prefix, and keeps `enable_external_matching=False`.
+
+That lets you validate three things safely:
+
+1. vLLM can import and construct the connector through
+   `kv_connector_module_path`
+2. scheduler-side nano-lmcache candidate hits are computed for real requests
+3. connector stats are emitted without changing inference behavior
+
+Expected log signals include:
+
+- `nano-lmcache connector match ... candidate_external_tokens=...`
+- `nano-lmcache connector stats={...}`
+- `KV Transfer metrics: nano_lmcache_candidate_tokens=...`
+
+In this mode, `nano_lmcache_actual_external_tokens` should remain `0`.
+
 ### Phase 2: block export/import adapter
 
 Goal: implement a version-specific adapter layer:

@@ -9,10 +9,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+import logging
 from typing import Any
 
 from nano_lmcache.index import MatchResult
 from nano_lmcache.integration.vllm_v1_adapter import NanoLMCacheVLLMAdapter
+
+
+logger = logging.getLogger(__name__)
 
 try:
     from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -108,6 +112,7 @@ def build_vllm_kv_transfer_config(
     connector_name: str = "NanoLMCacheConnectorV1",
     connector_module_path: str = "nano_lmcache.integration.vllm_v1_connector",
     enable_external_matching: bool = False,
+    enable_probe_logging: bool = False,
     kv_connector_extra_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a vLLM KVTransferConfig-compatible dictionary.
@@ -118,6 +123,7 @@ def build_vllm_kv_transfer_config(
     extra_config = {
         "nano_lmcache_registry_key": registry_key,
         "nano_lmcache_enable_external_matching": enable_external_matching,
+        "nano_lmcache_probe": enable_probe_logging,
     }
     if kv_connector_extra_config:
         extra_config.update(kv_connector_extra_config)
@@ -162,11 +168,13 @@ class NanoLMCacheVLLMConnectorCore:
         block_size: int = 16,
         load_kv_async: bool = False,
         enable_external_matching: bool = False,
+        probe_enabled: bool = False,
     ):
         self.matcher = matcher
         self.block_size = block_size
         self.load_kv_async = load_kv_async
         self.enable_external_matching = enable_external_matching
+        self.probe_enabled = probe_enabled
         self.adapter = NanoLMCacheVLLMAdapter(block_size=block_size)
         self._requests: dict[str, Any] = {}
         self._candidate_tokens: dict[str, int] = {}
@@ -193,6 +201,16 @@ class NanoLMCacheVLLMConnectorCore:
         actual_external_tokens = (
             result.new_external_tokens if self.enable_external_matching else 0
         )
+        if self.probe_enabled:
+            logger.info(
+                "nano-lmcache connector match req=%s prompt_tokens=%d "
+                "local_tokens=%d candidate_external_tokens=%d actual_external_tokens=%d",
+                request.request_id,
+                len(token_ids),
+                num_computed_tokens,
+                result.new_external_tokens,
+                actual_external_tokens,
+            )
         return actual_external_tokens, (
             self.load_kv_async and actual_external_tokens > 0
         )
@@ -236,6 +254,19 @@ class NanoLMCacheVLLMConnectorCore:
                     is_store=metadata.is_store,
                     load_kv_async=metadata.load_kv_async,
                 )
+            )
+        if self.probe_enabled and requests:
+            logger.info(
+                "nano-lmcache connector meta requests=%s",
+                [
+                    {
+                        "req_id": request.request_id,
+                        "candidate": request.candidate_token_count,
+                        "actual": request.matched_token_count,
+                        "is_store": request.is_store,
+                    }
+                    for request in requests
+                ],
             )
         return NanoLMCacheConnectorMetadata(requests=requests)
 
@@ -320,6 +351,7 @@ class NanoLMCacheConnectorV1(KVConnectorBase_V1):
                     enable_external_matching=self._get_enable_external_matching(
                         vllm_config
                     ),
+                    probe_enabled=self._get_probe_enabled(vllm_config),
                 )
 
         self.core = core
@@ -403,6 +435,8 @@ class NanoLMCacheConnectorV1(KVConnectorBase_V1):
             }
         )
         self._last_stats = stats
+        if getattr(self.core, "probe_enabled", False) and not stats.is_empty():
+            logger.info("nano-lmcache connector stats=%s", stats.data)
         return stats if not stats.is_empty() else None
 
     @classmethod
@@ -447,3 +481,12 @@ class NanoLMCacheConnectorV1(KVConnectorBase_V1):
         if get_extra is None:
             return False
         return bool(get_extra("nano_lmcache_enable_external_matching", False))
+
+    @staticmethod
+    def _get_probe_enabled(vllm_config: Any) -> bool:
+        if vllm_config is None or getattr(vllm_config, "kv_transfer_config", None) is None:
+            return False
+        get_extra = getattr(vllm_config.kv_transfer_config, "get_from_extra_config", None)
+        if get_extra is None:
+            return False
+        return bool(get_extra("nano_lmcache_probe", False))
