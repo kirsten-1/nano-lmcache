@@ -253,6 +253,31 @@ class NanoLMCache:
 
         return kv_cache, actual_matched
 
+    def match_prefix(self, tokens: List[int]) -> MatchResult:
+        """
+        Match the longest cached prefix without loading KV tensors.
+
+        This is useful for scheduler-side integrations that only need to know
+        how many prefix tokens are reusable before deciding whether to schedule
+        a remote KV load.
+        """
+        if not tokens:
+            return MatchResult(
+                matched_tokens=0,
+                matched_segments=[],
+                remaining_tokens=0,
+            )
+
+        segments = self.splitter.split(tokens)
+        if not segments:
+            return MatchResult(
+                matched_tokens=0,
+                matched_segments=[],
+                remaining_tokens=len(tokens),
+            )
+
+        return self.index.match_prefix(segments)
+
     def prefetch(
         self,
         tokens: List[int],
