@@ -266,3 +266,33 @@ def test_worker_stats_report_candidate_tokens_from_bound_metadata():
     assert stats.data["nano_lmcache_candidate_tokens"] == 112
     assert stats.data["nano_lmcache_actual_external_tokens"] == 0
     assert stats.data["nano_lmcache_matched_requests"] == 1
+
+
+def test_core_accepts_vllm_style_connector_output_fields():
+    prefix = list(range(128))
+    matcher = build_cached_matcher(prefix)
+    core = NanoLMCacheVLLMConnectorCore(
+        matcher,
+        block_size=16,
+        enable_external_matching=True,
+    )
+
+    request = make_request("req-8", prefix + [1, 2])
+    core.get_num_new_matched_tokens(request, 0)
+    core.update_state_after_alloc(
+        request,
+        FakeBlocks(([10, 11, 12, 13, 14, 15, 16, 17],)),
+        112,
+    )
+
+    core.update_connector_output(
+        SimpleNamespace(
+            finished_recving={"req-8"},
+            finished_sending=None,
+        )
+    )
+
+    pending = core.adapter.get_pending_request("req-8")
+    assert pending is not None
+    assert pending.worker_acknowledged is True
+    assert pending.needs_remote_load is False

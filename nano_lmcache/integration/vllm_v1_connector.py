@@ -13,7 +13,10 @@ import logging
 from typing import Any
 
 from nano_lmcache.index import MatchResult
-from nano_lmcache.integration.vllm_v1_adapter import NanoLMCacheVLLMAdapter
+from nano_lmcache.integration.vllm_v1_adapter import (
+    NanoLMCacheVLLMAdapter,
+    WorkerConnectorOutput,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -271,7 +274,18 @@ class NanoLMCacheVLLMConnectorCore:
         return NanoLMCacheConnectorMetadata(requests=requests)
 
     def update_connector_output(self, connector_output: Any) -> None:
-        self.adapter.update_connector_output(connector_output)
+        if isinstance(connector_output, WorkerConnectorOutput):
+            worker_output = connector_output
+        else:
+            worker_output = WorkerConnectorOutput(
+                finished_load_req_ids=set(
+                    getattr(connector_output, "finished_recving", None) or ()
+                ),
+                finished_store_req_ids=set(
+                    getattr(connector_output, "finished_sending", None) or ()
+                ),
+            )
+        self.adapter.update_connector_output(worker_output)
 
     def request_finished(
         self,
