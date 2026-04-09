@@ -26,6 +26,10 @@ class SegmentSplitter:
 
     Unlike LMCache's fixed-size chunking, we use variable-length segments
     based on semantic boundaries (sentence endings, special tokens, etc.)
+
+    IMPORTANT: Uses position-dependent hashing via RollingHasher.
+    The hash of each segment depends on ALL previous segments in the sequence,
+    ensuring the same tokens at different positions produce different hashes.
     """
 
     def __init__(
@@ -45,6 +49,7 @@ class SegmentSplitter:
         self.max_length = max_length
         self.min_length = min_length
         self.boundary_tokens = set(boundary_tokens or [])
+        self._hasher = RollingHasher()
 
     def split(self, tokens: List[int]) -> List[Segment]:
         """
@@ -55,6 +60,9 @@ class SegmentSplitter:
         2. If segment > max_length, force split
         3. If segment < min_length, merge with next
 
+        IMPORTANT: Hash is position-dependent. The same tokens at different
+        positions in the sequence will produce different hashes.
+
         Args:
             tokens: List of token IDs
 
@@ -64,10 +72,13 @@ class SegmentSplitter:
         if not tokens:
             return []
 
+        # Reset hasher for new sequence - hash depends on position in THIS sequence
+        self._hasher.reset()
+
         # Find split points
         split_points = self._find_split_points(tokens)
 
-        # Create segments from split points
+        # Create segments from split points (using rolling hash)
         segments = self._create_segments(tokens, split_points)
 
         return segments
@@ -129,23 +140,15 @@ class SegmentSplitter:
         return segments
 
     def _make_segment(self, tokens: List[int], start: int, end: int) -> Segment:
-        """Create a Segment object."""
-        hash_value = self._compute_hash(tokens)
+        """Create a Segment object with position-dependent hash."""
+        # Use rolling hasher - hash depends on all previous segments
+        hash_value = self._hasher.hash_segment(tokens)
         return Segment(
             tokens=tokens,
             start_idx=start,
             end_idx=end,
             hash_value=hash_value,
         )
-
-    @staticmethod
-    def _compute_hash(tokens: List[int]) -> str:
-        """Compute a fast hash for a token sequence.
-
-        Uses Python's built-in hash on a tuple for maximum speed.
-        No cryptographic security needed for KV cache indexing.
-        """
-        return format(hash(tuple(tokens)) & 0xFFFFFFFFFFFFFFFF, '016x')
 
 
 class RollingHasher:

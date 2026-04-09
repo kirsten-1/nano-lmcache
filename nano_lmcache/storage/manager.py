@@ -1,10 +1,14 @@
 """Tiered storage manager."""
 
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 import torch
 from ..index import StorageTier
 from .cpu import CPUStorageBackend
 from .disk import DiskStorageBackend
+
+# Callback type: (key, old_tier, new_tier) -> None
+# new_tier is None when deleted
+TierChangeCallback = Callable[[str, StorageTier, Optional[StorageTier]], None]
 
 
 class TieredStorageManager:
@@ -84,6 +88,21 @@ class TieredStorageManager:
         self._access_order: Dict[StorageTier, List[str]] = {
             tier: [] for tier in self._active_tiers
         }
+
+        # Callbacks for tier changes (notifies index to update SegmentMeta)
+        self._tier_change_callbacks: List[TierChangeCallback] = []
+
+    def register_tier_change_callback(self, callback: TierChangeCallback):
+        """Register a callback to be notified when a key changes tier or is deleted."""
+        self._tier_change_callbacks.append(callback)
+
+    def _notify_tier_change(self, key: str, old_tier: StorageTier, new_tier: Optional[StorageTier]):
+        """Notify all registered callbacks of a tier change."""
+        for callback in self._tier_change_callbacks:
+            try:
+                callback(key, old_tier, new_tier)
+            except Exception:
+                pass  # Don't let callback errors break storage operations
 
     @property
     def default_tier(self) -> StorageTier:
@@ -227,6 +246,13 @@ class TieredStorageManager:
             self._access_order[current_tier].remove(key)
         self._update_access(target_tier, key)
 
+        # Synchronize GPU operations if involved
+        if target_tier == StorageTier.GPU or current_tier == StorageTier.GPU:
+            self.synchronize()
+
+        # Notify callbacks of tier change
+        self._notify_tier_change(key, current_tier, target_tier)
+
         return True
 
     def demote(self, key: str) -> bool:
@@ -255,6 +281,13 @@ class TieredStorageManager:
             if key in self._access_order.get(current_tier, []):
                 self._access_order[current_tier].remove(key)
 
+            # Synchronize GPU operations if involved
+            if current_tier == StorageTier.GPU or actual_tier == StorageTier.GPU:
+                self.synchronize()
+
+            # Notify callbacks of tier change
+            self._notify_tier_change(key, current_tier, actual_tier)
+
         return success
 
     def demote_all(self) -> int:
@@ -268,10 +301,18 @@ class TieredStorageManager:
         for key in list(self._locations.keys()):
             if self.demote(key):
                 demoted += 1
+
+        # Ensure all GPU operations complete
+        self.synchronize()
         return demoted
 
-    def delete(self, key: str) -> bool:
-        """Delete a key from all tiers."""
+    def delete(self, key: str, notify: bool = True) -> bool:
+        """Delete a key from all tiers.
+
+        Args:
+            key: Key to delete
+            notify: Whether to notify callbacks (set False to avoid double notification)
+        """
         if key not in self._locations:
             return False
 
@@ -282,6 +323,9 @@ class TieredStorageManager:
             self._locations.pop(key, None)
             if key in self._access_order.get(tier, []):
                 self._access_order[tier].remove(key)
+            # Notify callbacks of deletion
+            if notify:
+                self._notify_tier_change(key, tier, None)
 
         return success
 
@@ -293,20 +337,48 @@ class TieredStorageManager:
         """Get the storage tier of a key."""
         return self._locations.get(key)
 
-    def _evict_one(self, tier: StorageTier) -> bool:
-        """Evict one entry from a tier (LRU)."""
+    def _evict_one(self, tier: StorageTier, depth: int = 0) -> bool:
+        """
+        Evict one entry from a tier (LRU) by demoting to lower tier.
+
+        Uses cascading demotion: if lower tier is full, recursively evict
+        from lower tier first before demoting.
+
+        Args:
+            tier: Tier to evict from
+            depth: Recursion depth (to prevent infinite loops)
+
+        Returns:
+            True if eviction succeeded
+        """
+        if depth > len(self._active_tiers):
+            return False  # Prevent infinite recursion
+
         if tier not in self._access_order or not self._access_order[tier]:
             return False
 
         # Get LRU key
         lru_key = self._access_order[tier][0]
 
-        # Try to demote
+        # Try to demote directly
         if self.demote(lru_key):
             return True
 
-        # Can't demote, just delete
-        return self.delete(lru_key)
+        # Demote failed - try to make room in lower tier first
+        lower = self._lower_tier(tier)
+        if lower is not None:
+            # Recursively evict from lower tier to make room
+            if self._evict_one(lower, depth + 1):
+                # Now try demote again
+                if self.demote(lru_key):
+                    return True
+
+        # Only delete as absolute last resort (lowest tier is full)
+        # This should only happen when disk is full
+        if lower is None:
+            return self.delete(lru_key)
+
+        return False
 
     def _update_access(self, tier: StorageTier, key: str):
         """Update LRU access order."""

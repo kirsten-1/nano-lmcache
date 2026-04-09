@@ -1,6 +1,6 @@
 """Main NanoLMCache engine."""
 
-from typing import List, Optional, Tuple, Dict, Any
+from typing import Any, Dict, List, Optional, Tuple
 import torch
 import threading
 from queue import Queue
@@ -61,6 +61,9 @@ class NanoLMCache:
             gpu_device=self.config.storage.gpu_device,
         )
 
+        # Register callback to sync index when storage tier changes
+        self.storage.register_tier_change_callback(self._on_storage_tier_change)
+
         # Async write support
         self._async_enabled = self.config.enable_async_write
         self._write_queue: Queue = Queue()
@@ -70,6 +73,32 @@ class NanoLMCache:
             self._start_async_writer()
 
         logger.info(f"NanoLMCache initialized with config: {self.config}")
+
+    def _on_storage_tier_change(
+        self,
+        key: str,
+        old_tier: StorageTier,
+        new_tier: Optional[StorageTier],
+    ):
+        """
+        Callback when storage tier changes.
+
+        Keeps index in sync with actual storage location.
+        """
+        # Extract segment hash from key (format: "kv_{hash}")
+        if not key.startswith("kv_"):
+            return
+
+        segment_hash = key[3:]  # Remove "kv_" prefix
+
+        if new_tier is None:
+            # Data was deleted - remove from index
+            self.index.remove(segment_hash)
+            logger.debug(f"Index removed: {key} (deleted from storage)")
+        else:
+            # Tier changed - update index
+            if self.index.update_storage_tier(segment_hash, new_tier):
+                logger.debug(f"Index updated: {key} {old_tier.value} -> {new_tier.value}")
 
     def _start_async_writer(self):
         """Start the async write worker thread."""
